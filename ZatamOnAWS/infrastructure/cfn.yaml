@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Multiplayer Game Infrastructure with GameLift, DynamoDB, S3, and RDS'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  
+  GameName:
+    Type: String
+    Default: MultiplayerGame
+    
+  BuildS3Bucket:
+    Type: String
+    Description: S3 bucket containing game server build
+    
+  BuildS3Key:
+    Type: String
+    Description: S3 key for game server build
+    
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: RDS database password
+
+Resources:
+  # VPC and Network Configuration
+  GameVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${GameName}-VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref GameVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${GameName}-Public-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref GameVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${GameName}-Public-2
+
+  # DynamoDB Tables
+  PlayerDataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${GameName}-PlayerData-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: playerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: playerId
+          KeyType: HASH
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # S3 Bucket for Game Assets
+  GameAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${GameName}-assets-${Environment}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # RDS Instance for Leaderboard
+  LeaderboardDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for Leaderboard DB
+      SubnetIds:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+
+  LeaderboardDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Sub ${GameName}Leaderboard
+      Engine: mysql
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBPassword
+      DBInstanceClass: db.t3.small
+      AllocatedStorage: 20
+      DBSubnetGroupName: !Ref LeaderboardDBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref LeaderboardDBSecurityGroup
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # GameLift Resources
+  GameLiftBuild:
+    Type: AWS::GameLift::Build
+    Properties:
+      Name: !Sub ${GameName}-Build-${Environment}
+      Version: !Ref Environment
+      OperatingSystem: WINDOWS_2016
+      StorageLocation:
+        Bucket: !Ref BuildS3Bucket
+        Key: !Ref BuildS3Key
+        RoleArn: !GetAtt GameLiftBuildRole.Arn
+
+  GameLiftFleet:
+    Type: AWS::GameLift::Fleet
+    DependsOn: GameLiftBuild
+    Properties:
+      BuildId: !Ref GameLiftBuild
+      EC2InstanceType: c5.large
+      FleetType: ON_DEMAND
+      Name: !Sub ${GameName}-Fleet-${Environment}
+      NewGameSessionProtectionPolicy: FULL_PROTECTION
+      RuntimeConfiguration:
+        GameSessionActivationTimeoutSeconds: 300
+        MaxConcurrentGameSessionActivations: 1
+        ServerProcesses:
+          - ConcurrentExecutions: 1
+            LaunchPath: C:\game\GameServer.exe
+      EC2InboundPermissions:
+        - FromPort: 7777
+          ToPort: 7777
+          IpRange: 0.0.0.0/0
+          Protocol: TCP
+
+  # IAM Roles
+  GameLiftBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: gamelift.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGameLiftBuildIAMRole
+
+  # Security Groups
+  LeaderboardDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Leaderboard RDS
+      VpcId: !Ref GameVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 10.0.0.0/16
+
+  # GameLift Queue
+  GameSessionQueue:
+    Type: AWS::GameLift::GameSessionQueue
+    Properties:
+      Name: !Sub ${GameName}-Queue-${Environment}
+      Destinations:
+        - DestinationArn: !Sub arn:aws:gamelift:${AWS::Region}:${AWS::AccountId}:fleet/${GameLiftFleet}
+      TimeoutInSeconds: 600
+
+Outputs:
+  PlayerDataTableName:
+    Description: DynamoDB table name for player data
+    Value: !Ref PlayerDataTable
+
+  GameAssetsBucketName:
+    Description: S3 bucket name for game assets
+    Value: !Ref GameAssetsBucket
+
+  LeaderboardDBEndpoint:
+    Description: RDS endpoint for leaderboard database
+    Value: !GetAtt LeaderboardDB.Endpoint.Address
+
+  GameLiftFleetId:
+    Description: GameLift Fleet ID
+    Value: !Ref GameLiftFleet
+
+  GameSessionQueueArn:
+    Description: GameLift Queue ARN
+    Value: !GetAtt GameSessionQueue.Arn

@@ -1,0 +1,10 @@
+{
+    "Parameters": {
+      "Environment": "dev",
+      "GameName": "YourGameName",
+      "BuildS3Bucket": "XXXXXXXXXXXXXXXXX",
+      "BuildS3Key": "builds/server-build.zip",
+      "DBPassword": "your-secure-password"
+    }
+  }
+  
