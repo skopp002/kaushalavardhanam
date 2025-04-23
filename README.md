@@ -4,14 +4,17 @@ This is a group created with an intent to up-skill members while enabling them t
 ## Ideation Document
 This document has the actual game build developed in ZatamOnAWS (Temporary name) folder
 
-## coding-agent
-This has a langgraph based multiagent orchestration application to enable code generation based on prompts
 
 ## Resources to build the games
-https://aws.amazon.com/blogs/gametech/online-multiplayer-amazon-gamelift-aws-serverless/
+1. https://aws.amazon.com/blogs/gametech/online-multiplayer-amazon-gamelift-aws-serverless/
 =======
 
 For Python Virtual Env:
 1.  cd coding-agent
 2.  python -m venv .venv
 3.  source .venv/bin/activate
+
+
+## coding-agent (Good to have)
+For those who are curious to explore creating coding assistants to inturn create games, here is an attempt. 
+This has a langgraph based multiagent orchestration application to enable code generation based on prompts
