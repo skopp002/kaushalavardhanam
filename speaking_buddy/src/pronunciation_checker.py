@@ -1,4 +1,4 @@
-"""Pronunciation comparison using MFCC and DTW"""
+"""Pronunciation comparison using MFCC and DTW, or Praat phonetic analysis"""
 import numpy as np
 from pathlib import Path
 from scipy.spatial.distance import euclidean
@@ -6,6 +6,9 @@ from scipy.ndimage import uniform_filter1d
 from typing import Tuple, Dict, Any
 from .audio_processor import preprocess_audio, extract_mfcc
 from .config import SCORE_THRESHOLDS, FEEDBACK_MESSAGES
+from .praat_analyzer import extract_all_praat_features
+from .feature_comparator import calculate_weighted_score
+from .feedback_generator import generate_phonetic_feedback
 
 
 def calculate_dtw_distance(ref_mfcc: np.ndarray, user_mfcc: np.ndarray) -> float:
@@ -242,5 +245,96 @@ def compare_pronunciations(
 
     # Generate detailed insights
     insights = generate_detailed_insights(score, ref_chars, user_chars, previous_score)
+
+    return score, feedback, insights
+
+
+def compare_pronunciations_praat(
+    reference_path: Path,
+    user_path: Path,
+    previous_score: float = None
+) -> Tuple[float, str, Dict[str, Any]]:
+    """
+    Compare user pronunciation against reference using Praat phonetic analysis.
+
+    This method provides more accurate phonetic comparison using:
+    - Pitch (F0) patterns for intonation
+    - Formants (F1, F2, F3) for vowel quality
+    - Intensity patterns for stress
+    - Duration/timing for rhythm
+    - Voice quality metrics (HNR, jitter, shimmer)
+
+    Args:
+        reference_path: Path to reference audio file
+        user_path: Path to user recording file
+        previous_score: Previous attempt score for trend analysis (optional)
+
+    Returns:
+        Tuple of (similarity score 0-100, feedback message, detailed insights dict)
+
+    Raises:
+        Exception: If audio processing or Praat analysis fails
+    """
+    # Extract Praat phonetic features from both audio files
+    ref_features = extract_all_praat_features(reference_path)
+    user_features = extract_all_praat_features(user_path)
+
+    # Calculate weighted score with feature breakdown
+    scores = calculate_weighted_score(ref_features, user_features)
+
+    # Get total score
+    score = scores['total_score']
+
+    # Generate phonetically meaningful feedback
+    phonetic_feedback = generate_phonetic_feedback(ref_features, user_features, scores)
+
+    # Get feedback message based on score
+    feedback = get_feedback_message(score)
+
+    # Build comprehensive insights dictionary
+    insights = {
+        "score": score,
+        "breakdown": scores['breakdown'],  # Individual feature scores
+        "improvements": phonetic_feedback.get('improvements', []),
+        "issues": phonetic_feedback.get('issues', []),
+        "suggestions": phonetic_feedback.get('suggestions', [])
+    }
+
+    # Add trend analysis if previous score provided
+    if previous_score is not None:
+        score_change = score - previous_score
+        insights["score_change"] = score_change
+
+        if score_change > 5:
+            insights["trend"] = "improving"
+            insights["trend_message"] = f"Great! You improved by {score_change:.1f} points!"
+        elif score_change < -5:
+            insights["trend"] = "declining"
+            insights["trend_message"] = f"Your score dropped by {abs(score_change):.1f} points"
+
+            # Analyze which features declined
+            decline_reasons = []
+            prev_breakdown = getattr(compare_pronunciations_praat, '_prev_breakdown', {})
+            if prev_breakdown:
+                for feature, current_score in scores['breakdown'].items():
+                    prev_score = prev_breakdown.get(feature, current_score)
+                    if current_score < prev_score - 5:
+                        feature_name = {
+                            'pitch': 'intonation',
+                            'formants': 'vowel pronunciation',
+                            'intensity': 'stress patterns',
+                            'duration': 'timing',
+                            'voice_quality': 'voice clarity'
+                        }.get(feature, feature)
+                        decline_reasons.append(f"Your {feature_name} changed from the previous attempt")
+
+            if decline_reasons:
+                insights["decline_reasons"] = decline_reasons
+        else:
+            insights["trend"] = "stable"
+            insights["trend_message"] = f"Similar to last time ({score_change:+.1f} points)"
+
+    # Store breakdown for next comparison
+    compare_pronunciations_praat._prev_breakdown = scores['breakdown']
 
     return score, feedback, insights

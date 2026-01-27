@@ -2,41 +2,50 @@
 import requests
 from pathlib import Path
 from typing import Optional
+from pydub import AudioSegment
 from .config import REFERENCE_AUDIO_DIR, REFERENCE_URLS
 
 
 def download_reference_audio(word: str, url: str) -> Path:
     """
-    Download reference audio from URL and save to cache directory.
+    Download reference audio from URL, convert to WAV, and save to cache directory.
 
     Args:
         word: The word being downloaded (e.g., "moien")
         url: URL to download the audio from
 
     Returns:
-        Path to the downloaded audio file
+        Path to the converted WAV audio file
 
     Raises:
         requests.RequestException: If download fails
     """
     # Create filename from word
-    filename = f"{word.lower()}.ogg"
-    filepath = REFERENCE_AUDIO_DIR / filename
+    ogg_filename = f"{word.lower()}.ogg"
+    ogg_filepath = REFERENCE_AUDIO_DIR / ogg_filename
+    wav_filepath = REFERENCE_AUDIO_DIR / f"{word.lower()}.wav"
 
-    # Download the file
+    # Download the OGG file
     response = requests.get(url, timeout=10)
     response.raise_for_status()
 
-    # Save to file
-    with open(filepath, 'wb') as f:
+    # Save OGG to temporary file
+    with open(ogg_filepath, 'wb') as f:
         f.write(response.content)
 
-    return filepath
+    # Convert OGG to WAV for Parselmouth compatibility
+    audio = AudioSegment.from_ogg(ogg_filepath)
+    audio.export(wav_filepath, format="wav")
+
+    # Clean up OGG file (optional - keep both for now)
+    # ogg_filepath.unlink()
+
+    return wav_filepath
 
 
 def get_reference_audio_path(word: str) -> Optional[Path]:
     """
-    Get path to cached reference audio file.
+    Get path to cached reference audio file (WAV format).
 
     Args:
         word: The word to look up (e.g., "moien")
@@ -44,11 +53,19 @@ def get_reference_audio_path(word: str) -> Optional[Path]:
     Returns:
         Path to cached audio file if it exists, None otherwise
     """
-    filename = f"{word.lower()}.ogg"
-    filepath = REFERENCE_AUDIO_DIR / filename
+    # Check for WAV file (Parselmouth-compatible format)
+    wav_filepath = REFERENCE_AUDIO_DIR / f"{word.lower()}.wav"
+    if wav_filepath.exists():
+        return wav_filepath
 
-    if filepath.exists():
-        return filepath
+    # Also check for OGG (legacy) and convert if found
+    ogg_filepath = REFERENCE_AUDIO_DIR / f"{word.lower()}.ogg"
+    if ogg_filepath.exists():
+        # Convert existing OGG to WAV
+        audio = AudioSegment.from_ogg(ogg_filepath)
+        audio.export(wav_filepath, format="wav")
+        return wav_filepath
+
     return None
 
 

@@ -1,7 +1,10 @@
 # Python
 *.py[cod]
+*.pyc
 *$py.class
 __pycache__/
+*/__pycache__/
+**/__pycache__/
 *.so
 
 # Virtual Environment
@@ -160,6 +163,11 @@ Desktop.ini
 # Application-specific
 # User recordings (entire directory - temporary files)
 data/user_recordings/
+
+# Database (user data)
+data/speaking_buddy.db
+data/*.db
+data/*.db-journal
 
 # Keep reference audio cached
 # data/reference_audio/
