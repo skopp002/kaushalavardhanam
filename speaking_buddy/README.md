@@ -32,7 +32,7 @@ Open http://localhost:8501 in your browser and start practicing!
 
 Watch the complete demonstration of Speaking Buddy in action:
 
-[](https://github.com/skopp002/kaushalavardhanam/blob/main/speaking_buddy/demo-video/demo_merged.mp4)
+[click here](https://github.com/skopp002/kaushalavardhanam/blob/main/speaking_buddy/demo-video/demo_merged.mp4)
 
 **What you'll see in the demo:**
 - User signup and authentication
