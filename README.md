@@ -4,8 +4,9 @@ This is a group created with an intent to up-skill members while enabling them t
 This repository is for bootstrapping initiatives being led under Kaushalavardhanam. Students/ aspirants can use this as inspiration to continue building in the project specific repositories
 
 ## Ideation Document
-This document has the actual game build developed in ZatamOnAWS (Temporary name) folder
-Cohort 1 - ZatamOnAWS
+The purpose of the projects for various cohorts in this repo are meant to provide seed resources to ensure projects proposed are feasible, achievable within stipulated period that students are able to commit to and to ensure the cohorts are successful in completing the products without having to evaluate multiple paths. 
+
+Cohort 1 - ZatamOnAWS - This document has the actual game build developed in ZatamOnAWS (Temporary name) folder. Final project is available https://github.com/skopp002/Sanskrit_Family_Feud_GameShow/tree/Survey
 Cohort 2 - speaking_buddy
 
 ## code_with_q_cli
