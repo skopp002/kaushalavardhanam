@@ -1,0 +1,30 @@
+# Core
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Audio I/O and processing
+pyaudio>=0.2.13
+librosa>=0.10.0
+soundfile>=0.12.0
+webrtcvad>=2.0.10
+
+# Vision
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# Language detection and ASR (edge)
+# These are large models - install as needed per deployment mode
+# torch>=2.1.0
+# torchaudio>=2.1.0
+# transformers>=4.36.0
+
+# AWS SDK (cloud mode)
+boto3>=1.34.0
+botocore>=1.34.0
+requests>=2.31.0
+
+# Logging and data
+pydantic>=2.5.0
+
+# Testing
+pytest>=7.4.0
