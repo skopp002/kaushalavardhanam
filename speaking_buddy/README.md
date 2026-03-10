@@ -31,8 +31,9 @@ Open http://localhost:8501 in your browser and start practicing!
 ## 🎥 Demo Video
 
 Watch the complete demonstration of Speaking Buddy in action:
+[Youtube demo video](https://youtu.be/CnTGadTXcAI)
 
-[click here](https://github.com/skopp002/kaushalavardhanam/blob/main/speaking_buddy/demo-video/demo_merged.mp4)
+[click here, to download the raw file and play locally](https://github.com/skopp002/kaushalavardhanam/blob/main/speaking_buddy/demo-video/demo_merged.mp4)
 
 **What you'll see in the demo:**
 - User signup and authentication
@@ -101,33 +102,33 @@ Watch the complete demonstration of Speaking Buddy in action:
 ### System Architecture Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           User Interface                             │
-│                        (Streamlit Web App)                           │
+┌────────────────────────────────────────────────────────────────────┐
+│                           User Interface                           │
+│                        (Streamlit Web App)                         │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌──────────────┐  │
 │  │   Login/   │  │ Dashboard  │  │  Practice  │  │   Session    │  │
 │  │  Signup    │  │  (Stats)   │  │  Session   │  │   History    │  │
 │  └──────┬─────┘  └──────┬─────┘  └──────┬─────┘  └──────┬───────┘  │
-└─────────┼────────────────┼────────────────┼────────────────┼─────────┘
-          │                │                │                │
-          │                └────────────────┴────────────────┘
+└─────────┼───────────────┼───────────────┼───────────────┼──────────┘
+          │               │               │               │
+          │               └─────────────────│─────────────┘
           ▼                                 ▼
-┌─────────────────────────┐   ┌─────────────────────────────────────┐
-│   Authentication Layer   │   │      Application Logic              │
-│                          │   │                                     │
+┌─────────────────────────┐   ┌────────────────────────────────────┐
+│   Authentication Layer  │   │      Application Logic             │
+│                         │   │                                    │
 │  ┌──────────────────┐   │   │  ┌──────────────────────────────┐  │
 │  │   database.py    │   │   │  │    session_manager.py        │  │
 │  │ • authenticate() │◄──┼───┼──┤  • Multi-word sessions       │  │
 │  │ • create_user()  │   │   │  │  • Progress tracking         │  │
 │  │ • hash_password()│   │   │  │  • Database persistence      │  │
 │  └──────────────────┘   │   │  └────────────┬─────────────────┘  │
-└──────────┬──────────────┘   │               │                     │
+└──────────┬──────────────┘   │               │                    │
            │                  │  ┌────────────▼─────────────────┐  │
            │                  │  │   pronunciation_checker.py   │  │
            │                  │  │  • Praat analysis pipeline   │  │
            │                  │  │  • Trend tracking            │  │
            │                  │  └────────────┬─────────────────┘  │
-           │                  │               │                     │
+           │                  │               │                    │
            │                  │  ┌────────────▼─────────────────┐  │
            │                  │  │      praat_analyzer.py       │  │
            │                  │  │  • Pitch (F0) extraction     │  │
@@ -135,54 +136,54 @@ Watch the complete demonstration of Speaking Buddy in action:
            │                  │  │  • Intensity & duration      │  │
            │                  │  │  • Voice quality (HNR)       │  │
            │                  │  └────────────┬─────────────────┘  │
-           │                  │               │                     │
+           │                  │               │                    │
            │                  │  ┌────────────▼─────────────────┐  │
            │                  │  │   feature_comparator.py      │  │
            │                  │  │  • DTW distance calculation  │  │
            │                  │  │  • Weighted scoring          │  │
            │                  │  └────────────┬─────────────────┘  │
-           │                  │               │                     │
+           │                  │               │                    │
            │                  │  ┌────────────▼─────────────────┐  │
            │                  │  │   feedback_generator.py      │  │
            │                  │  │  • Phonetic issue analysis   │  │
            │                  │  │  • Actionable suggestions    │  │
            │                  │  └──────────────────────────────┘  │
-           │                  └─────────────────────────────────────┘
+           │                  └────────────────────────────────────┘
            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                          Data Layer                                  │
-│                                                                       │
+│                          Data Layer                                 │
+│                                                                     │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │                    SQLite Database                             │  │
-│  │                  (speaking_buddy.db)                           │  │
-│  │                                                                 │  │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐     │  │
-│  │  │   users     │  │   sessions   │  │  word_attempts   │     │  │
-│  │  │  • username │  │  • user_id   │  │  • session_id    │     │  │
-│  │  │  • email    │  │  • score     │  │  • word          │     │  │
-│  │  │  • password │  │  • completed │  │  • score         │     │  │
-│  │  └──────┬──────┘  └──────┬───────┘  └──────┬───────────┘     │  │
-│  │         │                │                  │                  │  │
-│  │         └────────────────┴──────────────────┘                  │  │
-│  │                          │                                      │  │
-│  │                  ┌───────▼────────┐                            │  │
-│  │                  │  user_stats    │                            │  │
-│  │                  │  • total_sessions                           │  │
-│  │                  │  • avg_score   │                            │  │
-│  │                  └────────────────┘                            │  │
+│  │                    SQLite Database                            │  │
+│  │                  (speaking_buddy.db)                          │  │
+│  │                                                               │  │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐      │  │
+│  │  │   users     │  │   sessions   │  │  word_attempts   │      │  │
+│  │  │  • username │  │  • user_id   │  │  • session_id    │      │  │
+│  │  │  • email    │  │  • score     │  │  • word          │      │  │
+│  │  │  • password │  │  • completed │  │  • score         │      │  │
+│  │  └──────┬──────┘  └──────┬───────┘  └──────┬───────────┘      │  │
+│  │         │                │                 │                  │  │
+│  │         └────────────────┴─────────────────┘                  │  │
+│  │                          │                                    │  │
+│  │                  ┌───────▼──────────┐                         │  │
+│  │                  │  user_stats      │                         │  │
+│  │                  │  • total_sessions│                         │  │
+│  │                  │  • avg_score     │                         │  │
+│  │                  └──────────────────┘                         │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
           │                  │                  │
           ▼                  ▼                  ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        External Systems                              │
-│                                                                       │
+┌────────────────────────────────────────────────────────────────────┐
+│                        External Systems                            │
+│                                                                    │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐      │
 │  │   lod.lu     │  │   Browser    │  │  Local File System   │      │
 │  │ (Reference   │  │  Microphone  │  │  • Reference audio   │      │
 │  │   Audio)     │  │     API      │  │  • User recordings   │      │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘      │
-└─────────────────────────────────────────────────────────────────────┘
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Data Flow

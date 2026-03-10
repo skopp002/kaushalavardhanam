@@ -6,8 +6,8 @@ This repository is for bootstrapping initiatives being led under Kaushalavardhan
 ## Ideation Document
 The purpose of the projects for various cohorts in this repo are meant to provide seed resources to ensure projects proposed are feasible, achievable within stipulated period that students are able to commit to and to ensure the cohorts are successful in completing the products without having to evaluate multiple paths. 
 
-Cohort 1 - ZatamOnAWS - This document has the actual game build developed in ZatamOnAWS (Temporary name) folder. Final project is available https://github.com/skopp002/Sanskrit_Family_Feud_GameShow/tree/Survey
-Cohort 2 - [speaking_buddy](speaking_buddy/) - A Streamlit-based Luxembourgish pronunciation learning tool with Praat-based phonetic analysis
+- Cohort 1 - ZatamOnAWS - This document has the actual game build developed in ZatamOnAWS (Temporary name) folder. Final project is available https://github.com/skopp002/Sanskrit_Family_Feud_GameShow/tree/Survey
+- Cohort 2 - [speaking_buddy]([speaking_buddy](https://github.com/skopp002/kaushalavardhanam/blob/main/speaking_buddy/README.md)/) - A Streamlit-based Luxembourgish pronunciation learning tool with Praat-based phonetic analysis
 Cohort 3 - [mitra](mitra/) - A multilingual conversational robot with vision and audio capabilities for Sanskrit and Kannada
 
 ## code_with_q_cli
