@@ -38,7 +38,7 @@ Mitra supports two deployment modes that address different infrastructure constr
 | **Vision** | YOLOv8/MobileNet on-device | Amazon Nova Vision via Bedrock |
 | **Model Size** | 1B-7B parameter range | Cloud-scale models |
 | **Latency** | 8-20s end-to-end (realistic) | 5-9s end-to-end |
-| **Sanskrit Support** | Not feasible (no models exist) | Via Translation Bridge (experimental) |
+| **Sanskrit Support** | Currently Not feasible (no models exist) | Via Translation Bridge (experimental) |
 | **Kannada Support** | Feasible | Feasible |
 
 ---
