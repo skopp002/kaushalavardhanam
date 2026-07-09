@@ -17,16 +17,27 @@ logger = logging.getLogger("mitra")
 
 
 class EnergySegmenter:
-    """RMS-threshold segmentation with a silence hangover."""
+    """RMS-threshold segmentation with a silence hangover.
 
-    def __init__(self, samplerate: int = TARGET_SAMPLERATE, threshold: float = 0.01,
+    By default the speech gate is adaptive: an EMA of the ambient noise floor,
+    with speech = 3x the floor (bounded below by ``min_gate``). Mic capture
+    levels vary hugely between machines/settings — a fixed threshold that works
+    on one setup is deaf on another. Pass ``threshold`` to pin it instead.
+    """
+
+    _FLOOR_RATIO = 3.0
+
+    def __init__(self, samplerate: int = TARGET_SAMPLERATE,
+                 threshold: float | None = None, min_gate: float = 0.004,
                  min_speech_s: float = 0.3, min_silence_s: float = 0.8,
                  max_utterance_s: float = 15.0):
         self._sr = samplerate
         self._threshold = threshold
+        self._min_gate = min_gate
         self._min_speech = min_speech_s * samplerate
         self._min_silence = min_silence_s * samplerate
         self._max_utterance = max_utterance_s * samplerate
+        self._floor = min_gate / self._FLOOR_RATIO
         self.reset()
 
     def reset(self) -> None:
@@ -40,7 +51,13 @@ class EnergySegmenter:
         if len(chunk) == 0:
             return None
         rms = float(np.sqrt(np.mean(chunk ** 2)))
-        loud = rms >= self._threshold
+        if self._threshold is not None:
+            gate = self._threshold
+        else:
+            gate = max(self._FLOOR_RATIO * self._floor, self._min_gate)
+        loud = rms >= gate
+        if not loud and not self._in_speech:  # track ambient level while idle
+            self._floor = 0.95 * self._floor + 0.05 * rms
 
         if not self._in_speech:
             if loud:

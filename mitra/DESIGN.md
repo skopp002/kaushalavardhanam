@@ -12,7 +12,7 @@ This document describes *how* Mitra is built: module decomposition, the Strands 
 
 ![Mitra architecture — cloud-extended](architecture-cloud.png)
 
-**Execution order on wake (numbered):**
+**Execution sequence on wake (time flows downward; same numbering as the architecture arrows):**
 
 ![Mitra wake flow](flow-wake.png)
 

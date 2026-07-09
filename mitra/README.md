@@ -12,11 +12,11 @@ Mitra ("friend" in Sanskrit) is an interactive desktop robot built on the **Reac
 
 ![Mitra architecture — cloud-extended](architecture-cloud.png)
 
-### What happens when you say "hey mitra" — order of execution
+### What happens when you say "hey mitra" — sequence of execution
 
-![Mitra wake flow — numbered steps](flow-wake.png)
+![Mitra wake sequence diagram](flow-wake.png)
 
-Steps 1–7 are the wake-and-greet phase; steps 8–16 are one conversation turn, which repeats until 30 seconds of silence puts Mitra back to sleep.
+Time flows downward: messages 1–7 are the wake-and-greet phase; 8–17 are one conversation turn, repeating until 30 seconds of silence puts Mitra back to sleep. The numbers on the Option A/B architecture arrows above mark the same order on the component view.
 
 *Editable diagram sources: [architecture-local.excalidraw](architecture-local.excalidraw) · [architecture-cloud.excalidraw](architecture-cloud.excalidraw) · [flow-wake.excalidraw](flow-wake.excalidraw) — open at [excalidraw.com](https://excalidraw.com) or with the VS Code Excalidraw extension. Regenerate all three with `python scripts/gen_diagrams.py`.*
 

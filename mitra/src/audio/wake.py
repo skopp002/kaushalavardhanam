@@ -64,7 +64,8 @@ class TranscriptWakeDetector:
 
     def __init__(self, phrase: str = "mitra",
                  asr_model: str = "mlx-community/whisper-tiny",
-                 energy_threshold: float = 0.01, min_speech_s: float = 0.3,
+                 energy_threshold: float | None = None,  # None = adaptive gate
+                 min_speech_s: float = 0.3,
                  hangover_s: float = 0.5, max_window_s: float = 3.0,
                  transcribe_fn=None):
         base = phrase.strip().lower()
@@ -79,6 +80,9 @@ class TranscriptWakeDetector:
     def _mlx_transcribe(self, audio: np.ndarray) -> str:
         import mlx_whisper
 
+        peak = float(np.abs(audio).max())
+        if peak > 0:  # normalize: Whisper mis-hears quiet capture badly
+            audio = (audio / peak * 0.9).astype(np.float32)
         return mlx_whisper.transcribe(
             audio, path_or_hf_repo=self._asr_model
         ).get("text", "")

@@ -29,8 +29,12 @@ class Transcriber:
         """Returns (transcript, language hint from the ASR engine)."""
         import mlx_whisper
 
+        audio = np.asarray(audio_16k_mono, dtype=np.float32)
+        peak = float(np.abs(audio).max())
+        if peak > 0:  # normalize: Whisper mis-hears quiet capture badly
+            audio = audio / peak * 0.9
         result = mlx_whisper.transcribe(
-            np.asarray(audio_16k_mono, dtype=np.float32),
+            audio,
             path_or_hf_repo=self._default_model,
         )
         text = result.get("text", "").strip()
