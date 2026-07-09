@@ -12,7 +12,11 @@ This document describes *how* Mitra is built: module decomposition, the Strands 
 
 ![Mitra architecture — cloud-extended](architecture-cloud.png)
 
-*Editable sources: [architecture-local.excalidraw](architecture-local.excalidraw) · [architecture-cloud.excalidraw](architecture-cloud.excalidraw) (open at excalidraw.com or with the VS Code Excalidraw extension).*
+**Execution order on wake (numbered):**
+
+![Mitra wake flow](flow-wake.png)
+
+*Editable sources: [architecture-local.excalidraw](architecture-local.excalidraw) · [architecture-cloud.excalidraw](architecture-cloud.excalidraw) · [flow-wake.excalidraw](flow-wake.excalidraw) (open at excalidraw.com or with the VS Code Excalidraw extension).*
 
 ---
 

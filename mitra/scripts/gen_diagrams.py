@@ -54,6 +54,47 @@ VARIANTS = {
         ],
         "notes": [],
     },
+    "flow": {
+        "file": "flow-wake",
+        "title": 'Mitra - order of execution when you say "hey mitra" (numbered steps)',
+        "standalone": True,
+        "nodes": [
+            ("user",    15, 330, 150, 130, "User", "#fff3bf", "box", 14),
+            ("robot",  210, 60, 200, 640, "Reachy Mini\n(sim or real)", "#f1f3f5", "container", 13),
+            ("mics",   230, 150, 160, 60, "Microphones", "#ffffff", "box", 12),
+            ("head",   230, 330, 160, 60, "Head motors", "#ffffff", "box", 12),
+            ("speaker",230, 540, 160, 60, "Speaker", "#ffffff", "box", 12),
+            ("host",   440, 60, 1120, 640, "Host (MacBook) - Mitra pipeline, all local", "#e7f5ff", "container", 14),
+            ("wake",   470, 140, 200, 70, "Wake detector\n('mitra' in transcript)", "#ffffff", "box", 12),
+            ("asr",    470, 300, 200, 80, "VAD + Whisper ASR\n+ language detect", "#ffffff", "box", 12),
+            ("orch",   730, 130, 260, 120, "Orchestrator\nASLEEP > WAKING >\nLISTENING > THINKING\n> SPEAKING", "#d0ebff", "box", 12),
+            ("agent",  1050, 140, 220, 100, "Strands Agent\n(4 robot tools)", "#d0ebff", "box", 12),
+            ("llm",    1330, 140, 210, 100, "Ollama\nQwen3-VL 8B\ninstruct", "#d3f9d8", "box", 12),
+            ("valid",  1050, 300, 220, 90, "Validator + lexicon\nDevanagari check;\nverified names win", "#ffffff", "box", 11),
+            ("tts",    730, 480, 260, 90, "Indic Parler-TTS\n(Sanskrit voice)", "#ffffff", "box", 12),
+        ],
+        "edges": [
+            ("user", "mics",    "1) \"hey mitra\"",          "r", 0.25, "l", 0.5, False, False),
+            ("mics", "wake",    "2) audio stream",           "r", 0.3, "l", 0.5, False, False),
+            ("wake", "orch",    "3) wake event",             "r", 0.5, "l", 0.3, False, False),
+            ("orch", "head",    "4) nod()",                  "b", 0.1, "t", 0.5, False, False),
+            ("orch", "tts",     "5) greet: 'namaste'",       "b", 0.5, "t", 0.5, False, False),
+            ("tts", "speaker",  "6) greeting wav",           "l", 0.3, "r", 0.3, False, False),
+            ("speaker", "user", "7) namaste heard",          "l", 0.3, "r", 0.65, False, False),
+            ("user", "mics",    "8) question (en/kn/sa)",    "r", 0.6, "l", 0.85, False, False),
+            ("mics", "asr",     "9) utterance",              "b", 0.5, "l", 0.2, False, False),
+            ("asr", "orch",     "10) transcript + lang",     "r", 0.5, "l", 0.9, False, False),
+            ("orch", "agent",   "11) turn message",          "r", 0.5, "l", 0.5, False, False),
+            ("agent", "llm",    "12) chat + tools\n(capture_image...)", "r", 0.5, "l", 0.5, False, True),
+            ("agent", "valid",  "13) draft reply",           "b", 0.5, "t", 0.5, False, False),
+            ("valid", "tts",    "14) validated Sanskrit",    "l", 0.8, "r", 0.3, False, False),
+            ("tts", "speaker",  "15) reply wav",             "l", 0.7, "r", 0.7, False, False),
+            ("speaker", "user", "16) Sanskrit reply heard",  "l", 0.7, "r", 0.9, False, False),
+        ],
+        "notes": [
+            (440, 720, "Steps 1-7: wake + greet.   Steps 8-16: one conversation turn (repeats from 8).\n30 s of silence -> back to ASLEEP (step 1 required again).", 12),
+        ],
+    },
     "cloud": {
         "file": "architecture-cloud",
         "title": "Mitra - Option B: cloud-extended inference (speech + wake word stay local)",
@@ -76,8 +117,11 @@ VARIANTS = {
 
 def build(variant):
     v = VARIANTS[variant]
-    NODES = BASE_NODES[:6] + v["nodes"][:1] + BASE_NODES[6:] + v["nodes"][1:]
-    EDGES = BASE_EDGES + v["edges"]
+    if v.get("standalone"):
+        NODES, EDGES = v["nodes"], v["edges"]
+    else:
+        NODES = BASE_NODES[:6] + v["nodes"][:1] + BASE_NODES[6:] + v["nodes"][1:]
+        EDGES = BASE_EDGES + v["edges"]
     nodes = {n[0]: n for n in NODES}
 
     def anchor(nid, side, frac):
@@ -196,5 +240,5 @@ def build(variant):
     print(f"{v['file']}: {len(elements)} excalidraw elements, png {im.shape[1]}x{im.shape[0]}, "
           f"{dark:.1%} non-white pixels {'OK' if dark > 0.01 else 'BLANK?!'}")
 
-for variant in ("local", "cloud"):
+for variant in ("local", "cloud", "flow"):
     build(variant)

@@ -12,7 +12,13 @@ Mitra ("friend" in Sanskrit) is an interactive desktop robot built on the **Reac
 
 ![Mitra architecture — cloud-extended](architecture-cloud.png)
 
-*Editable diagram sources: [architecture-local.excalidraw](architecture-local.excalidraw) · [architecture-cloud.excalidraw](architecture-cloud.excalidraw) — open at [excalidraw.com](https://excalidraw.com) or with the VS Code Excalidraw extension.*
+### What happens when you say "hey mitra" — order of execution
+
+![Mitra wake flow — numbered steps](flow-wake.png)
+
+Steps 1–7 are the wake-and-greet phase; steps 8–16 are one conversation turn, which repeats until 30 seconds of silence puts Mitra back to sleep.
+
+*Editable diagram sources: [architecture-local.excalidraw](architecture-local.excalidraw) · [architecture-cloud.excalidraw](architecture-cloud.excalidraw) · [flow-wake.excalidraw](flow-wake.excalidraw) — open at [excalidraw.com](https://excalidraw.com) or with the VS Code Excalidraw extension. Regenerate all three with `python scripts/gen_diagrams.py`.*
 
 **Flow in one paragraph:** the robot's microphones stream over USB through the `reachy-mini` SDK to a local **openWakeWord** model listening for "mitra". On wake, the robot nods and greets; **Silero VAD** segments utterances, **Whisper** transcribes them (with language detection across English/Kannada/Sanskrit), and a **Strands Agent** — using the **OllamaModel provider** against a local **Qwen3-VL 8B** (conversation + vision + native tool calling) — produces a short Sanskrit reply. Replies pass a Devanagari validator, get spoken by **AI4Bharat Indic Parler-TTS**, and play through the robot's speaker. Object questions make the model call its `capture_image` tool, with a **human-verified Sanskrit lexicon cache** overriding generated names for accuracy.
 
@@ -119,26 +125,43 @@ References: [simulation setup guide](https://github.com/pollen-robotics/reachy_m
 
 ## Running
 
+### One-time installation
+
+Everything below assumes the venv is active (`source .venv/bin/activate` — see Setup above).
+
 ```bash
 cd mitra
-
-# Unit tests — no robot, no models, no network needed (fakes throughout)
-uv venv .venv --python 3.12
-uv pip install --python .venv/bin/python numpy pyyaml pillow pytest
-.venv/bin/python -m pytest
-
-# Which components are installed / is Ollama up / lexicon seed count
-.venv/bin/python main.py --check
-
-# Full pipeline (after: pip install -e '.[all]', ollama pull qwen3-vl:8b,
-# and a running daemon — real robot or the simulator above)
-python main.py --debug
+pip install -e '.[agent,wake,vad,asr]'          # agent + speech-input layers
+pip install torch transformers git+https://github.com/huggingface/parler-tts.git   # Sanskrit TTS
+ollama pull qwen3-vl:8b-instruct                # the LLM (~6 GB, one time)
 ```
 
-The lexicon review CLI (FR-2.5) lists model-generated names awaiting human verification: `mitra-lexicon --db data/lexicon.db`.
+> **⚠️ Ollama must be the native Apple Silicon build.** Install the official app from [ollama.com/download](https://ollama.com/download). An Intel-Homebrew Ollama at `/usr/local` runs under Rosetta with **no GPU access** — replies take ~60 s instead of ~3 s. Verify with `ollama ps` after a query: it must say `100% GPU`.
+>
+> **⚠️ Use the `:8b-instruct` tag, not `:8b`.** The bare tag is the *thinking* variant — it burns the latency budget on hidden reasoning and returns empty replies.
+
+### Talking to Mitra — three processes
+
+| Where | Command | Role |
+|---|---|---|
+| Terminal 1 | `mjpython -m reachy_mini.daemon.app.main --sim --scene minimal` | The **robot**: simulator daemon + MuJoCo viewer window. With a real Reachy Mini Lite on USB, run `reachy-mini-daemon` instead — nothing else changes. |
+| Ollama app, or Terminal 2 | open the Ollama menu-bar app (it runs the server itself), or run `ollama serve` | The **LLM serving layer** on `localhost:11434` |
+| Terminal 3 | `python main.py --debug` | **Mitra**: wake word, ears, brain wiring, voice |
+
+Remember `source .venv/bin/activate` in every terminal. When all three are up: say **"hey mitra"** near the microphone → the robot nods and greets you with नमस्ते → speak English, Kannada, or Sanskrit → it replies in spoken Sanskrit. In simulation, the robot's microphone and speaker are your Mac's, and its camera sees the simulated table (duck, croissant, apple — all three have verified lexicon entries).
+
+> **First run is slow:** the wake/ASR Whisper models and the ~2 GB Parler-TTS voice download from Hugging Face on first use. After that the whole pipeline is local — it works with Wi-Fi off (the design goal).
+
+### Development commands
+
+```bash
+.venv/bin/python -m pytest              # 59 tests; tests/hw/ auto-skips without a daemon
+.venv/bin/python main.py --check        # what's installed / is Ollama up / lexicon count
+mitra-lexicon --db data/lexicon.db      # review model-generated Sanskrit names (FR-2.5)
+```
 
 ## Status
 
-Implemented and unit-tested with fakes: orchestrator state machine, robot wrapper (+`FakeReachy`), agent tools, validator, lexicon store (53-entry seed), language detector, audio/TTS module skeletons, `main.py` wiring. Not yet exercised against live models or a daemon — that is Phase 0/1 bring-up (REQUIREMENTS §10): install the extras, `ollama pull qwen3-vl:8b`, train the "mitra" wake model, and run against the simulator or robot. The seed lexicon needs review by a Sanskrit reviewer (FR-2.6).
+Implemented and verified: orchestrator state machine, robot wrapper (+`FakeReachy`), agent tools, validator, lexicon store (53-entry seed), language detector, wake engines (ASR-transcript now; openWakeWord once the custom "mitra" model is trained), `main.py` wiring — 59 tests green, including live-simulator smoke tests. Live-verified on the M1 Max: Strands agent → Ollama (`qwen3-vl:8b-instruct`, 100% GPU) answers English/Kannada/Sanskrit input with valid Devanagari Sanskrit in ~3 s warm. Remaining Phase 1–4 work: train the custom wake model, verify Parler-TTS latency on MPS, Sanskrit-ASR evaluation, and the seed-lexicon review by a Sanskrit reviewer (FR-2.6).
 
 Predecessor feasibility study (edge Jetson / AWS Bedrock design) is preserved in git history: `git show 40639db:mitra/README.md`.

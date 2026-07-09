@@ -41,6 +41,15 @@ class ReachyRobot:
         self._mic_chunk_s = mic_chunk_s
         self._stop_playback = threading.Event()
         self._playing = threading.Event()
+        # Dedicated drain thread: the SDK's appsink queue holds only ~2 s, so
+        # the mic must be drained at realtime even while consumers (wake ASR,
+        # Whisper) block — otherwise GStreamer drops samples.
+        self._closed = threading.Event()
+        self._mic_buf: deque[np.ndarray] = deque()
+        self._mic_samples = 0
+        self._mic_cap = 30 * self._in_sr  # ring: keep at most 30 s
+        self._mic_ready = threading.Condition()
+        threading.Thread(target=self._mic_drain_loop, daemon=True).start()
 
     # --- camera ---
 
@@ -54,29 +63,50 @@ class ReachyRobot:
     def mic_samplerate(self) -> int:
         return self._in_sr
 
-    def mic_read(self) -> np.ndarray:
-        """Mono float32 chunk of ~mic_chunk_s; blocks roughly that long.
+    def _mic_drain_loop(self) -> None:
+        """Continuously pull ~10 ms buffers from the SDK into our ring buffer.
 
-        The SDK's get_audio_sample() pulls ONE ~10 ms buffer per call from a
-        bounded appsink queue (or None when empty) — so we must drain in a
-        loop to keep up with realtime, not pace with a fixed sleep.
+        get_audio_sample() returns ONE buffered chunk per call (or None), so
+        it must be called in a tight loop to keep up with realtime.
         """
-        target = int(self._in_sr * self._mic_chunk_s)
-        deadline = time.monotonic() + max(0.2, 4 * self._mic_chunk_s)
-        chunks: list[np.ndarray] = []
-        total = 0
-        while total < target and time.monotonic() < deadline:
-            samples = self._mini.media.get_audio_sample()
+        while not self._closed.is_set():
+            try:
+                samples = self._mini.media.get_audio_sample()
+            except Exception:
+                time.sleep(0.1)
+                continue
             if samples is None or len(samples) == 0:
-                time.sleep(0.005)
+                time.sleep(0.003)
                 continue
             mono = np.asarray(samples, dtype=np.float32)
             if mono.ndim == 2:
                 mono = mono.mean(axis=1)
-            chunks.append(mono)
-            total += len(mono)
-        if not chunks:
-            return np.zeros(0, dtype=np.float32)
+            with self._mic_ready:
+                self._mic_buf.append(mono)
+                self._mic_samples += len(mono)
+                while self._mic_samples > self._mic_cap:  # drop oldest
+                    self._mic_samples -= len(self._mic_buf.popleft())
+                self._mic_ready.notify_all()
+
+    def mic_read(self) -> np.ndarray:
+        """Mono float32 chunk of ~mic_chunk_s from the ring buffer; blocks up
+        to ~one chunk length. Slow consumers delay processing, never capture."""
+        target = int(self._in_sr * self._mic_chunk_s)
+        deadline = time.monotonic() + max(0.2, 2 * self._mic_chunk_s)
+        with self._mic_ready:
+            while self._mic_samples < target and not self._closed.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._mic_ready.wait(timeout=remaining)
+            if not self._mic_buf:
+                return np.zeros(0, dtype=np.float32)
+            chunks, taken = [], 0
+            while self._mic_buf and taken < target:
+                chunk = self._mic_buf.popleft()
+                chunks.append(chunk)
+                taken += len(chunk)
+            self._mic_samples -= taken
         return np.concatenate(chunks)
 
     # --- speaker ---
@@ -118,7 +148,10 @@ class ReachyRobot:
         self._mini.goto_target(head=self._create_head_pose(), duration=0.3)
 
     def close(self) -> None:
+        self._closed.set()
         self._stop_playback.set()
+        with self._mic_ready:
+            self._mic_ready.notify_all()
         try:
             self._mini.media.stop_recording()
             self._mini.media.stop_playing()

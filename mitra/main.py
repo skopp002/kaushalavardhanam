@@ -110,6 +110,9 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     models = config["models"]
     tts = SanskritTTS(model=models["tts"]["model"], device=models["tts"]["device"])
     wake = make_wake_detector(**models["wake"])
+    if hasattr(wake, "warmup"):
+        logger.info("warming up wake ASR (first run downloads whisper-tiny)...")
+        wake.warmup()
     vad_cfg = models["vad"]
     segmenter = make_segmenter(
         vad_cfg.get("engine", "silero"),

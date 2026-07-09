@@ -15,6 +15,7 @@ Mitra (from मित्रम् "friend"; "mitra" is its vocative — सम�
 | `REQUIREMENTS.md` (v1.3) | Functional requirements FR-1..FR-7, memory/latency budgets, risks R1..R7, 8-week phased plan with acceptance criteria |
 | `DESIGN.md` (v1.2) | Module decomposition, Strands↔Reachy integration, state machine, prompting/validation, decisions D1..D5 |
 | `architecture-local.png` / `architecture-cloud.png` | Option A (fully local, the v1 target) and Option B (cloud-extended) |
+| `flow-wake.png` | Numbered order of execution for a wake + conversation turn |
 
 ## Load-bearing decisions — don't silently reverse these
 
@@ -29,7 +30,7 @@ Mitra (from मित्रम् "friend"; "mitra" is its vocative — सम�
 
 - **Git:** stage with `git add` only — the maintainer commits manually. Never run `git commit` or `git push`.
 - **Docs are versioned** (header line in each). Bump the version and add a one-line change note when you materially change REQUIREMENTS.md or DESIGN.md.
-- **Diagrams:** regenerate both variants with `python3 scripts/gen_diagrams.py` (needs matplotlib + Pillow). It emits `.excalidraw` + `.png` pairs from one shared spec — edit the spec in the script, not the outputs. If you hand-edit an `.excalidraw` instead, re-export its PNG from Excalidraw itself so they match.
+- **Diagrams:** regenerate all three variants with `python3 scripts/gen_diagrams.py` (needs matplotlib + Pillow). It emits `.excalidraw` + `.png` pairs from one shared spec — edit the spec in the script, not the outputs. If you hand-edit an `.excalidraw` instead, re-export its PNG from Excalidraw itself so they match.
 - **Sanskrit in docs/code:** Devanagari with IAST transliteration alongside; simple laukika register.
 
 ## History

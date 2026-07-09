@@ -91,6 +91,11 @@ class TranscriptWakeDetector:
         cleaned = re.sub(r"[^\wऀ-ॿ]+", "", text.lower())
         return any(v in cleaned for v in self._variants)
 
+    def warmup(self) -> None:
+        """Trigger the one-time whisper download/load before the run loop, so
+        the first real wake attempt isn't stalled behind it."""
+        self._transcribe(np.zeros(8000, dtype=np.float32))
+
     def reset(self) -> None:
         self._segmenter.reset()
 
