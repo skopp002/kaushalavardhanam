@@ -136,6 +136,18 @@ pip install torch transformers git+https://github.com/huggingface/parler-tts.git
 ollama pull qwen3-vl:8b-instruct                # the LLM (~6 GB, one time)
 ```
 
+**Unlock the Sanskrit voice** (one time — the TTS model is a *gated* Hugging Face repo with automatic approval):
+
+1. Create a free account at [huggingface.co](https://huggingface.co/join) if you don't have one.
+2. While logged in, open [ai4bharat/indic-parler-tts](https://huggingface.co/ai4bharat/indic-parler-tts) and click **"Agree and access repository"** — access is granted instantly.
+3. Create a *read* token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and log the machine in: `hf auth login` (paste the token when prompted).
+
+When it worked, the model page shows this badge instead of the request form — that's your goal state:
+
+![Gated model access granted on Hugging Face](images/accepted-gated-model-access-on-hf.png)
+
+Skip this and Mitra still speaks: it automatically falls back to an ungated Hindi VITS voice (`facebook/mms-tts-hin`) that reads Devanagari — intelligible, but its Sanskrit pronunciation is approximate. The console warns when the fallback is in use.
+
 > **⚠️ Ollama must be the native Apple Silicon build.** Install the official app from [ollama.com/download](https://ollama.com/download). An Intel-Homebrew Ollama at `/usr/local` runs under Rosetta with **no GPU access** — replies take ~60 s instead of ~3 s. Verify with `ollama ps` after a query: it must say `100% GPU`.
 >
 > **⚠️ Use the `:8b-instruct` tag, not `:8b`.** The bare tag is the *thinking* variant — it burns the latency budget on hidden reasoning and returns empty replies.
@@ -150,7 +162,7 @@ ollama pull qwen3-vl:8b-instruct                # the LLM (~6 GB, one time)
 
 Remember `source .venv/bin/activate` in every terminal. When all three are up: say **"hey mitra"** near the microphone → the robot nods and greets you with नमस्ते → speak English, Kannada, or Sanskrit → it replies in spoken Sanskrit. In simulation, the robot's microphone and speaker are your Mac's, and its camera sees the simulated table (duck, croissant, apple — all three have verified lexicon entries).
 
-> **First run is slow:** the wake/ASR Whisper models and the ~2 GB Parler-TTS voice download from Hugging Face on first use. After that the whole pipeline is local — it works with Wi-Fi off (the design goal).
+> **First run is slow — by design, up front.** At startup Mitra *warms up* its speech models: it runs each ASR engine once on silence so the one-time downloads (whisper-tiny for the wake word, then Whisper large-v3, ~3 GB, for transcription) happen right away with a "warming up" log line — instead of silently stalling your first question for minutes. The TTS voice (~2 GB) still downloads on the first reply. After these one-time downloads the whole pipeline is local — it works with Wi-Fi off (the design goal).
 
 ### Development commands
 

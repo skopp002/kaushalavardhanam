@@ -108,7 +108,8 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     from mitra.speech.tts import SanskritTTS
 
     models = config["models"]
-    tts = SanskritTTS(model=models["tts"]["model"], device=models["tts"]["device"])
+    tts = SanskritTTS(model=models["tts"]["model"], device=models["tts"]["device"],
+                      fallback_model=models["tts"].get("fallback", "facebook/mms-tts-hin"))
     wake = make_wake_detector(**models["wake"])
     if hasattr(wake, "warmup"):
         logger.info("warming up wake ASR (first run downloads whisper-tiny)...")
@@ -123,6 +124,16 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
                       sanskrit_model=models["asr"].get("sanskrit"),
                       backend=models["asr"].get("backend", "mlx"),
                       device=models["asr"].get("device", "mps"))
+    # Warm up ASR before the run loop: Whisper large-v3 (~3 GB) downloads on
+    # first use. Without this, the download would stall the FIRST conversation
+    # turn for minutes with no feedback; here it happens at startup with a log
+    # line, and later runs load from the local cache in seconds.
+    logger.info("warming up ASR (first run downloads Whisper, ~3 GB one time)...")
+    import numpy as np
+    try:
+        asr.transcribe(np.zeros(8000, dtype=np.float32))  # 0.5 s of silence
+    except Exception:
+        logger.exception("ASR warmup failed — continuing; the first turn will retry")
     lexicon = LexiconStore(config["lexicon"]["db_path"])
     agent = MitraAgent(models["llm"], build_tools(robot, tts))
 

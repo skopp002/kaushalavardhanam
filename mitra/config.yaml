@@ -20,7 +20,7 @@ models:
   tts:
     engine: "indic-parler-tts"
     model: "ai4bharat/indic-parler-tts"
-    fallback: "indic-tts-vits"
+    fallback: "facebook/mms-tts-hin"   # ungated VITS; auto-used when parler is inaccessible
     device: "mps"
   wake:
     # asr: a small Whisper transcribes short speech windows and matches the
