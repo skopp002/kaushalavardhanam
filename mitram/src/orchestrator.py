@@ -1,428 +1,331 @@
-"""Central orchestrator for Mitra - coordinates all subsystems."""
+"""Orchestrator state machine (DESIGN §3–§4).
+
+States: ASLEEP → WAKING → LISTENING → THINKING → SPEAKING → LISTENING … → ASLEEP.
+
+Single-threaded core: all transitions happen in ``handle_event`` on the run
+loop's thread. Two daemon helpers — the audio pump and the playback watcher —
+communicate with the core only by putting events on the queue (DESIGN §3).
+Tests drive ``handle_event`` directly with fakes; ``run()`` adds the threads.
+
+The agent may call tools itself, but two paths stay deterministic regardless
+of model quality (DESIGN §1.4): ``nod`` fires here on wake, and every reply
+passes the validator and is spoken here.
+"""
+
+from __future__ import annotations
+
+import json
 import logging
+import queue
+import re
+import threading
 import time
-from dataclasses import dataclass, field
-from typing import Optional, List
+from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 
-from config import (
-    DeploymentMode, Language, Intent,
-    LANGUAGE_CONFIDENCE_THRESHOLD, IDLE_TIMEOUT_SEC,
-    OBJECT_CONFIDENCE_THRESHOLD, BRIDGE_LANGUAGE,
-)
-from src.audio_io import AudioIO
-from src.language_detector import LanguageDetector, DetectionResult
-from src.vision_module import VisionModule, VisionResult
-from src.logging_subsystem import (
-    InteractionLog, LogSerializer, LogStorage,
-    QueryInfo, VisionInfo, ResponseInfo, ConfidenceScores,
-)
+from mitram import language_detector
+from mitram.agent import prompts, validator
+from mitram.agent.tools import END_SESSION_SENTINEL
+from mitram.audio import TARGET_SAMPLERATE, resample
 
-logger = logging.getLogger(__name__)
+
+class State(str, Enum):
+    ASLEEP = "ASLEEP"
+    WAKING = "WAKING"
+    LISTENING = "LISTENING"
+    THINKING = "THINKING"
+    SPEAKING = "SPEAKING"
 
 
 @dataclass
-class ConversationTurn:
-    role: str  # "user" or "assistant"
-    text: str
-    language: str
-    timestamp: str = ""
-
-
-@dataclass
-class SessionState:
-    active_language: Optional[Language] = None
-    conversation_history: List[ConversationTurn] = field(default_factory=list)
-    last_vision_result: Optional[VisionResult] = None
-    deployment_mode: DeploymentMode = DeploymentMode.CLOUD
-    is_active: bool = True
+class Event:
+    kind: str  # wake | utterance | playback_done | tick | stop
+    payload: object = None
 
 
 class Orchestrator:
-    """Coordinates the flow between all Mitra subsystems.
+    def __init__(self, *, robot, agent, tts, lexicon,
+                 wake=None, segmenter=None, asr=None,
+                 turn_logger=None, logger: logging.Logger | None = None,
+                 silence_timeout_s: float = 30.0,
+                 max_reply_chars: int = validator.MAX_REPLY_CHARS,
+                 fallback_agent_factory=None):
+        self.robot = robot
+        self.agent = agent
+        self.tts = tts
+        self.lexicon = lexicon
+        self.wake = wake
+        self.segmenter = segmenter
+        self.asr = asr
+        self.turn_logger = turn_logger
+        self.logger = logger or logging.getLogger("mitram")
+        self.silence_timeout_s = silence_timeout_s
+        self.max_reply_chars = max_reply_chars
+        self._fallback_agent_factory = fallback_agent_factory
+        self._fallback_agent = None
 
-    Manages the pipeline: Audio -> Language Detection -> Intent Classification ->
-    {Conversation | Vision | Navigation} -> Response -> Audio Output.
-    """
+        self.state = State.ASLEEP
+        self.events: queue.Queue[Event] = queue.Queue()
+        self._stop = threading.Event()
+        self._sleep_after_speaking = False
+        self._last_activity = time.monotonic()
 
-    def __init__(
-        self,
-        mode: DeploymentMode = DeploymentMode.CLOUD,
-        use_file_io: bool = False,
-        input_file=None,
-        output_dir=None,
-        vision_backend: str = "mock",
-    ):
-        self.mode = mode
-        self.session = SessionState(deployment_mode=mode)
+    # ------------------------------------------------------------------ run
 
-        self.audio = AudioIO(
-            use_file_io=use_file_io,
-            input_file=input_file,
-            output_dir=output_dir,
-        )
-        self.language_detector = LanguageDetector()
-        self.vision = VisionModule(backend=vision_backend)
-        self.log_storage = LogStorage()
+    def run(self) -> None:
+        self._stop.clear()
+        threading.Thread(target=self._audio_loop, daemon=True).start()
+        self.logger.info("Mitram asleep — say the wake word")
+        while not self._stop.is_set():
+            try:
+                event = self.events.get(timeout=0.5)
+            except queue.Empty:
+                event = Event("tick")
+            try:
+                self.handle_event(event)
+            except Exception:  # FR-6.4: log, apologize, keep the session alive
+                self.logger.exception("error handling %s in %s", event.kind, self.state)
+                if self.state == State.THINKING:
+                    self._speak(prompts.APOLOGY_RETRY)
+                    self.state = State.SPEAKING
 
-        self._edge_modules = None
-        self._cloud_modules = None
+    def stop(self) -> None:
+        self.events.put(Event("stop"))
 
-        if mode == DeploymentMode.EDGE:
-            self._init_edge()
-        else:
-            self._init_cloud()
+    # ------------------------------------------------------- event dispatch
 
-    def _init_edge(self):
-        from src.edge.asr_engine import ASREngine
-        from src.edge.tts_engine import TTSEngine
-        from src.edge.slm import SLM
-        from src.edge.vision_vqa import EdgeVQA
+    def handle_event(self, event: Event) -> None:
+        kind = event.kind
+        if kind == "stop":
+            self._stop.set()
+        elif kind == "tick":
+            self._check_silence_timeout()
+        elif kind == "wake":
+            if self.state == State.ASLEEP:
+                self._on_wake()
+            elif self.state in (State.SPEAKING, State.WAKING):
+                # barge-in (DESIGN §1.3): stop playback, listen again
+                self.robot.speaker_stop()
+                self._to_listening()
+        elif kind == "utterance" and self.state == State.LISTENING:
+            self._on_utterance(event.payload)
+        elif kind == "playback_done":
+            if self._sleep_after_speaking:
+                self._go_to_sleep()
+            elif self.state in (State.WAKING, State.SPEAKING):
+                self._to_listening()
 
-        asr = ASREngine()
-        tts = TTSEngine()
-        slm = SLM()
-        vqa = EdgeVQA(slm=slm)
+    # ---------------------------------------------------------- transitions
 
-        self._edge_modules = {
-            "asr": asr,
-            "tts": tts,
-            "slm": slm,
-            "vqa": vqa,
-        }
+    def _on_wake(self) -> None:
+        self.state = State.WAKING
+        self.logger.info("wake word detected")
+        self.robot.nod()                      # deterministic (DESIGN §1.4)
+        self._speak(prompts.GREETING)         # → playback_done → LISTENING
 
-        logger.info("Loading edge models...")
-        start = time.time()
-        for name, module in self._edge_modules.items():
-            if hasattr(module, "load_model"):
-                success = module.load_model()
-                logger.info("  %s: %s", name, "loaded" if success else "mock mode")
-        elapsed = time.time() - start
-        logger.info("Edge models loaded in %.1fs", elapsed)
+    def _to_listening(self) -> None:
+        self.state = State.LISTENING
+        self._last_activity = time.monotonic()
+        if self.segmenter:
+            self.segmenter.reset()
 
-    def _init_cloud(self):
-        from src.cloud.nova_sonic_client import NovaSonicClient
-        from src.cloud.nova_vision_client import NovaVisionClient
-        from src.cloud.translation_bridge import TranslationBridge
+    def _check_silence_timeout(self) -> None:
+        if (self.state == State.LISTENING
+                and time.monotonic() - self._last_activity > self.silence_timeout_s):
+            self.logger.info("silence timeout — session ends (FR-1.5)")
+            self._go_to_sleep()
 
-        sonic = NovaSonicClient()
-        vision_client = NovaVisionClient()
-        bridge = TranslationBridge()
+    def _go_to_sleep(self) -> None:
+        self.state = State.ASLEEP
+        self._sleep_after_speaking = False
+        self.agent.reset()                    # context is per-session (FR-3.3)
+        if self.wake:
+            self.wake.reset()
+        if self.segmenter:
+            self.segmenter.reset()
+        self.logger.info("asleep")
 
-        self._cloud_modules = {
-            "sonic": sonic,
-            "vision_client": vision_client,
-            "bridge": bridge,
-        }
+    def _on_utterance(self, payload) -> None:
+        self.state = State.THINKING
+        self._last_activity = time.monotonic()
+        tl = self.turn_logger
+        if tl:
+            tl.start_turn()
 
-        if sonic.check_connectivity():
-            logger.info("Bedrock API connected")
-        else:
-            logger.warning("Bedrock API unreachable - cloud features unavailable")
-
-    def run(self):
-        """Main loop: listen -> detect language -> process -> respond."""
-        logger.info("Mitra started in %s mode", self.mode.value)
-
-        if not self.audio.is_available:
-            logger.error("Audio hardware unavailable")
+        transcript, hint = self._transcribe(payload)
+        if not transcript.strip():
+            self._finish_turn(prompts.APOLOGY_RETRY)
             return
 
-        self.audio.start_listening()
+        lang = language_detector.detect(transcript, hint)
+        message = f"[lang={lang}] {transcript}"
+        if tl:
+            tl.set("lang", lang)
+            tl.set("transcript", transcript)
 
         try:
-            while self.session.is_active:
-                utterance = self.audio.get_utterance()
-                if utterance is None:
-                    if self.audio.is_idle:
-                        logger.debug("Idle - waiting for speech")
-                    continue
+            reply, session_end = self._generate_reply(message)
+        except Exception:
+            self.logger.exception("agent failure (FR-6.4)")
+            reply, session_end = prompts.APOLOGY_RETRY, False
 
-                self._process_utterance(utterance)
+        if session_end:
+            self._sleep_after_speaking = True
+            reply = prompts.FAREWELL
+        self._finish_turn(reply)
 
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-        finally:
-            self.shutdown()
+    def _finish_turn(self, reply: str) -> None:
+        tl = self.turn_logger
+        if tl:
+            tl.set("reply", reply)
+        if tl:
+            with tl.stage("tts"):
+                self._speak(reply)
+            tl.emit()
+        else:
+            self._speak(reply)
+        self.state = State.SPEAKING
 
-    def process_single(self, audio: np.ndarray) -> Optional[str]:
-        """Process a single utterance and return response text. For testing."""
-        return self._process_utterance(audio)
+    def _transcribe(self, payload) -> tuple[str, str | None]:
+        if isinstance(payload, str):          # tests / text console mode
+            return payload, None
+        tl = self.turn_logger
+        if tl:
+            with tl.stage("asr"):
+                return self.asr.transcribe(payload)
+        return self.asr.transcribe(payload)
 
-    def _process_utterance(self, audio: np.ndarray) -> Optional[str]:
-        start_time = time.time()
-        latency = {}
+    # ------------------------------------------------------------ thinking
 
-        # Step 1: Language detection
-        t0 = time.time()
-        detection = self.language_detector.detect(audio)
-        latency["language_detection"] = int((time.time() - t0) * 1000)
+    def _generate_reply(self, message: str) -> tuple[str, bool]:
+        """Agent call + lexicon substitution + validation with one retry
+        (FR-3.5), then the config-gated cloud fallback (FR-6.3)."""
+        tl = self.turn_logger
 
-        if detection.confidence < LANGUAGE_CONFIDENCE_THRESHOLD:
-            self._prompt_repeat(detection)
+        def generate(msg: str) -> str:
+            if tl:
+                with tl.stage("llm"):
+                    return self.agent.converse(msg)
+            return self.agent.converse(msg)
+
+        raw = generate(message)
+        if END_SESSION_SENTINEL in raw:
+            return raw, True
+
+        reply = self._apply_lexicon(raw)
+        ok, reason = validator.validate(reply, self.max_reply_chars)
+        if ok:
+            return reply, False
+
+        self.logger.warning("reply failed validation (%s); retrying", reason)
+        reply = self._apply_lexicon(
+            generate(message + "\n" + prompts.CORRECTIVE_SUFFIX)
+        )
+        ok, reason = validator.validate(reply, self.max_reply_chars)
+        if ok:
+            return reply, False
+
+        self.logger.warning("retry failed validation (%s)", reason)
+        cloud = self._try_cloud_fallback(message)
+        return (cloud if cloud is not None else prompts.SAFE_FALLBACK), False
+
+    def _try_cloud_fallback(self, message: str) -> str | None:
+        if self._fallback_agent_factory is None:
+            return None
+        try:
+            if self._fallback_agent is None:
+                self._fallback_agent = self._fallback_agent_factory()
+            reply = self._apply_lexicon(self._fallback_agent.converse(message))
+            ok, _ = validator.validate(reply, self.max_reply_chars)
+            return reply if ok else None
+        except Exception:
+            self.logger.exception("cloud fallback failed (FR-6.3)")
             return None
 
-        if self.session.active_language != detection.language:
-            self.session.active_language = detection.language
-            logger.info("Language switched to %s", detection.language.value)
+    # ------------------------------------------------------- vision/lexicon
 
-        # Step 2: Classify intent
-        intent = self._classify_intent(audio)
+    def _apply_lexicon(self, reply: str) -> str:
+        """Vision turns answer in strict JSON (DESIGN §5). Verified lexicon
+        names always override the generated name (FR-2.5); new names are
+        recorded unverified for review (DESIGN §4)."""
+        data = _extract_json(reply)
+        if not data or "object_en" not in data:
+            return reply
+        object_en = str(data["object_en"])
+        generated = str(data.get("name_sa_devanagari", "")).strip()
+        sentence = str(data.get("sentence_sa", "")).strip()
+        if not sentence and generated:
+            sentence = f"एतत् {generated} अस्ति।"
 
-        # Step 3: Route to appropriate pipeline
-        if self.mode == DeploymentMode.EDGE:
-            response_text, response_audio, latency = self._process_edge(
-                audio, intent, latency
+        row = self.lexicon.lookup(object_en)
+        if row and row["verified"]:
+            verified_name = row["name_devanagari"]
+            if generated and generated in sentence:
+                sentence = sentence.replace(generated, verified_name)
+            else:
+                sentence = f"एतत् {verified_name} अस्ति।"
+        elif row is None and generated:
+            self.lexicon.add_unverified(
+                object_en, generated, str(data.get("name_iast", "")), object_en
             )
-        else:
-            response_text, response_audio, latency = self._process_cloud(
-                audio, intent, latency
-            )
+        return sentence or reply
 
-        # Step 4: Play response
-        if response_audio is not None:
-            self.audio.play_audio(response_audio)
-        elif response_text:
-            logger.info("Response (text only): %s", response_text[:100])
+    # ------------------------------------------------------------- speaking
 
-        # Step 5: Update conversation history
-        if response_text:
-            self.session.conversation_history.append(
-                ConversationTurn(role="assistant", text=response_text,
-                                language=self.session.active_language.value)
-            )
-
-        # Step 6: Log interaction
-        latency["total"] = int((time.time() - start_time) * 1000)
-        self._log_interaction(
-            query_text=response_text or "",
-            response_text=response_text or "",
-            intent=intent,
-            latency=latency,
-            detection=detection,
-        )
-
-        return response_text
-
-    def _process_edge(self, audio, intent, latency):
-        asr = self._edge_modules["asr"]
-        tts = self._edge_modules["tts"]
-        slm = self._edge_modules["slm"]
-        vqa = self._edge_modules["vqa"]
-        lang = self.session.active_language.value
-
-        # ASR
-        t0 = time.time()
-        transcription = asr.transcribe(audio, language=lang)
-        latency["asr"] = int((time.time() - t0) * 1000)
-        query_text = transcription.text
-
-        self.session.conversation_history.append(
-            ConversationTurn(role="user", text=query_text, language=lang)
-        )
-
-        # Generate response based on intent
-        vision_context = None
-        if intent == Intent.VISION:
-            vision_result = self.vision.recognize_objects()
-            self.session.last_vision_result = vision_result
-            labels = [d.label for d in vision_result.detections
-                      if d.confidence >= OBJECT_CONFIDENCE_THRESHOLD]
-            if labels:
-                vision_context = ", ".join(labels)
-
-            t0 = time.time()
-            vqa_result = vqa.answer_query(
-                question=query_text,
-                frame=vision_result.frame,
-                object_labels=labels,
-                language=lang,
-            )
-            latency["slm"] = int((time.time() - t0) * 1000)
-            response_text = vqa_result.answer
-        else:
-            history = [
-                {"role": t.role, "content": t.text}
-                for t in self.session.conversation_history[-10:]
-            ]
-            t0 = time.time()
-            gen_result = slm.generate(
-                prompt=query_text,
-                language=lang,
-                conversation_history=history,
-            )
-            latency["slm"] = int((time.time() - t0) * 1000)
-            response_text = gen_result.text
-
-        # TTS
-        t0 = time.time()
-        synthesis = tts.synthesize(response_text, language=lang)
-        latency["tts"] = int((time.time() - t0) * 1000)
-
-        return response_text, synthesis.audio, latency
-
-    def _process_cloud(self, audio, intent, latency):
-        sonic = self._cloud_modules["sonic"]
-        vision_client = self._cloud_modules["vision_client"]
-        bridge = self._cloud_modules["bridge"]
-        lang = self.session.active_language
-
-        if intent == Intent.VISION:
-            return self._process_cloud_vision(audio, bridge, vision_client, lang, latency)
-
-        return self._process_cloud_conversation(audio, bridge, sonic, lang, latency)
-
-    def _process_cloud_conversation(self, audio, bridge, sonic, lang, latency):
-        system_prompt = self._build_system_prompt(lang)
-        history = [
-            {"role": t.role, "content": t.text}
-            for t in self.session.conversation_history[-10:]
-        ]
-
-        t0 = time.time()
-        sonic_response = sonic.process_speech(
-            audio=audio,
-            system_prompt=system_prompt,
-            conversation_history=history,
-        )
-        latency["nova_sonic"] = int((time.time() - t0) * 1000)
-
-        if not sonic_response.success:
-            logger.error("Nova Sonic error: %s", sonic_response.error)
-            return None, None, latency
-
-        response_text = sonic_response.text or ""
-
-        # Translate back if needed
-        response_audio = sonic_response.audio
-        if bridge.is_bridge_needed(lang) and response_text:
-            t0 = time.time()
-            translated = bridge.translate_from_bridge(response_text, lang)
-            latency["translation_out"] = int((time.time() - t0) * 1000)
-            response_text = translated.translated_text
-
-        self.session.conversation_history.append(
-            ConversationTurn(role="user", text="[audio input]", language=lang.value)
-        )
-
-        return response_text, response_audio, latency
-
-    def _process_cloud_vision(self, audio, bridge, vision_client, lang, latency):
-        vision_result = self.vision.recognize_objects()
-        self.session.last_vision_result = vision_result
-        frame = vision_result.frame
-
-        # For VQA we need the query as text - use a simple transcription approach
-        query_text = "[object query]"
-
-        # Translate query to bridge language if needed
-        if bridge.is_bridge_needed(lang):
-            t0 = time.time()
-            translated_query = bridge.translate_to_bridge(query_text, lang)
-            latency["translation_in"] = int((time.time() - t0) * 1000)
-            query_for_vision = translated_query.translated_text
-        else:
-            query_for_vision = query_text
-
-        t0 = time.time()
-        vision_response = vision_client.ask_about_image(
-            image=frame,
-            question=query_for_vision,
-        )
-        latency["nova_vision"] = int((time.time() - t0) * 1000)
-
-        if not vision_response.success:
-            logger.error("Nova Vision error: %s", vision_response.error)
-            return None, None, latency
-
-        response_text = vision_response.answer
-
-        # Translate back if needed
-        if bridge.is_bridge_needed(lang):
-            t0 = time.time()
-            translated_response = bridge.translate_from_bridge(response_text, lang)
-            latency["translation_out"] = int((time.time() - t0) * 1000)
-            response_text = translated_response.translated_text
-
-        return response_text, None, latency
-
-    def _classify_intent(self, audio: np.ndarray) -> Intent:
-        """Classify user intent. Currently uses a simple heuristic.
-
-        A full implementation would use the transcribed text + a classifier.
-        For now, check if a new frame is available from the vision module.
-        """
-        if self.vision.is_available:
-            frame = self.vision.capture_frame()
-            if frame is not None:
-                return Intent.VISION
-        return Intent.CONVERSATION
-
-    def _build_system_prompt(self, lang: Language) -> str:
-        lang_name = "Kannada" if lang == Language.KANNADA else "Sanskrit"
-        return (
-            f"You are Mitra (मित्र), a friendly multilingual conversational robot. "
-            f"Respond in {lang_name}. Be helpful, concise, and conversational. "
-            f"If the user asks about an object they are showing, describe what you see."
-        )
-
-    def _prompt_repeat(self, detection: DetectionResult):
-        logger.info(
-            "Low confidence (%.2f) for language detection, prompting repeat",
-            detection.confidence,
-        )
-
-    def _log_interaction(self, query_text, response_text, intent, latency, detection):
+    def _speak(self, text: str) -> None:
+        """Deterministic speech path (DESIGN §1.4): synthesize, play without
+        blocking (for barge-in), post playback_done when the speaker frees up."""
+        self.logger.info("speak: %s", text)
         try:
-            vision_info = VisionInfo()
-            if self.session.last_vision_result:
-                top = self.session.last_vision_result.detections
-                if top:
-                    vision_info = VisionInfo(
-                        object_label=top[0].label,
-                        confidence=top[0].confidence,
-                    )
+            wav, samplerate = self.tts.synthesize(text)
+            self.robot.speaker_play(wav, samplerate, block=False)
+        except Exception:
+            self.logger.exception("TTS/playback failure (FR-6.4)")
+            self.events.put(Event("playback_done"))
+            return
+        threading.Thread(target=self._watch_playback, daemon=True).start()
 
-            bridge_used = (
-                self.mode == DeploymentMode.CLOUD
-                and self.session.active_language is not None
-                and self._cloud_modules is not None
-                and self._cloud_modules["bridge"].is_bridge_needed(
-                    self.session.active_language
-                )
-            )
+    def _watch_playback(self) -> None:
+        time.sleep(0.05)
+        while self.robot.speaker_busy() and not self._stop.is_set():
+            time.sleep(0.05)
+        self.events.put(Event("playback_done"))
 
-            log = InteractionLog(
-                active_language=self.session.active_language.value if self.session.active_language else "unknown",
-                deployment_mode=self.mode.value,
-                query=QueryInfo(
-                    transcribed_text=query_text,
-                    source="asr" if self.mode == DeploymentMode.EDGE else "nova_sonic",
-                ),
-                vision=vision_info,
-                response=ResponseInfo(
-                    text=response_text,
-                    translation_bridge_used=bridge_used,
-                    bridge_language=BRIDGE_LANGUAGE if bridge_used else None,
-                ),
-                confidence_scores=ConfidenceScores(
-                    language_detection=detection.confidence,
-                ),
-                latency_ms=latency.get("total", 0),
-            )
-            self.log_storage.save_interaction(log)
-        except Exception as e:
-            logger.warning("Failed to log interaction: %s", e)
+    # ------------------------------------------------------------ audio I/O
 
-    def shutdown(self):
-        logger.info("Shutting down Mitra...")
-        self.audio.stop()
-        self.vision.stop()
+    def _audio_loop(self) -> None:
+        """Pump mic chunks to the wake detector or segmenter by state."""
+        while not self._stop.is_set():
+            try:
+                chunk = self.robot.mic_read()
+            except Exception:
+                self.logger.exception("microphone read failure")
+                time.sleep(0.5)
+                continue
+            if chunk is None or len(chunk) == 0:
+                continue
+            if self.robot.mic_samplerate != TARGET_SAMPLERATE:
+                chunk = resample(chunk, self.robot.mic_samplerate, TARGET_SAMPLERATE)
 
-        if self._edge_modules:
-            for module in self._edge_modules.values():
-                if hasattr(module, "unload_model"):
-                    module.unload_model()
+            state = self.state
+            if state in (State.ASLEEP, State.SPEAKING, State.WAKING):
+                if self.wake and self.wake.process(chunk):
+                    self.events.put(Event("wake"))
+            elif state == State.LISTENING and self.segmenter is not None:
+                utterance = self.segmenter.process(chunk)
+                if utterance is not None:
+                    self.events.put(Event("utterance", utterance))
 
-        logger.info("Mitra stopped")
+
+def _extract_json(text: str) -> dict | None:
+    """Pull the first JSON object out of a reply (tolerates ``` fences)."""
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None

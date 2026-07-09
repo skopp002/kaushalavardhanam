@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mitram"
+version = "0.1.0"
+description = "Mitram (मित्रम्) — Sanskrit-speaking interactive robot on Reachy Mini Lite"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# Each hardware/model layer is optional so the pipeline can be developed and
+# tested piecemeal (fakes stand in for anything not installed).
+robot = ["reachy-mini"]                      # add [mujoco] extra manually for simulation
+agent = ["strands-agents[ollama]>=1.0"]
+wake = ["openwakeword>=0.6"]
+vad = ["silero-vad>=5.0", "torch>=2.3"]
+asr = ["mlx-whisper>=0.4; platform_machine=='arm64' and sys_platform=='darwin'"]
+# Indic Parler-TTS additionally needs the parler-tts package, which is not on
+# PyPI: pip install git+https://github.com/huggingface/parler-tts.git
+speech = ["transformers>=4.46", "torch>=2.3", "soundfile>=0.12"]
+dev = ["pytest>=8.0"]
+all = ["mitram[robot,agent,wake,vad,asr,speech]"]
+
+[project.scripts]
+mitram-lexicon = "mitram.lexicon.store:review_cli"
+
+[tool.setuptools]
+package-dir = {"mitram" = "src"}
+packages = [
+    "mitram",
+    "mitram.agent",
+    "mitram.audio",
+    "mitram.lexicon",
+    "mitram.robot",
+    "mitram.speech",
+]
+
+[tool.setuptools.package-data]
+"mitram.lexicon" = ["seed_lexicon.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

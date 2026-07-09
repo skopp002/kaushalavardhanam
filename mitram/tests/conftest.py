@@ -1,37 +1,83 @@
-"""Shared fixtures for Mitra test suite."""
+"""Shared fixtures: package bootstrap + fakes (DESIGN §9)."""
+
+from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-# Ensure the Mitra project root is on sys.path so that
-# `from config import ...` works the same way it does in production code.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+_ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    import mitram  # noqa: F401  (pip-installed)
+except ImportError:  # run from the repo checkout: alias src/ as the mitram package
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "mitram", _ROOT / "src" / "__init__.py",
+        submodule_search_locations=[str(_ROOT / "src")],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["mitram"] = module
+    spec.loader.exec_module(module)
+
+from mitram.lexicon.store import LexiconStore  # noqa: E402
+from mitram.robot.reachy import FakeReachy  # noqa: E402
+
+
+class FakeTTS:
+    """Records synthesized text; returns 0.1 s of silence."""
+
+    def __init__(self):
+        self.spoken: list[str] = []
+
+    def synthesize(self, text: str):
+        self.spoken.append(text)
+        return np.zeros(1600, dtype=np.float32), 16000
+
+
+class CannedAgent:
+    """Returns queued replies in order; records every prompt it gets."""
+
+    def __init__(self, replies=()):
+        self.replies = list(replies)
+        self.calls: list[str] = []
+        self.resets = 0
+
+    def converse(self, message: str) -> str:
+        self.calls.append(message)
+        return self.replies.pop(0) if self.replies else "अस्तु।"
+
+    def reset(self) -> None:
+        self.resets += 1
 
 
 @pytest.fixture
-def sample_audio():
-    """1 second of 440 Hz sine wave as a float32 numpy array at 16 kHz."""
-    sample_rate = 16000
-    duration = 1.0
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    audio = (0.5 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
-    return audio
+def fake_robot():
+    return FakeReachy()
 
 
 @pytest.fixture
-def sample_image():
-    """640x480 random RGB image as a uint8 numpy array."""
-    rng = np.random.default_rng(42)
-    return rng.integers(0, 256, size=(480, 640, 3), dtype=np.uint8)
+def fake_tts():
+    return FakeTTS()
 
 
 @pytest.fixture
-def tmp_dir(tmp_path):
-    """Temporary directory for output files (pytest built-in tmp_path)."""
-    return tmp_path
+def lexicon():
+    return LexiconStore(":memory:")
+
+
+@pytest.fixture
+def make_orchestrator(fake_robot, fake_tts, lexicon):
+    """Factory: orchestrator wired with fakes; tests drive handle_event()."""
+    from mitram.orchestrator import Orchestrator
+
+    def _make(replies=(), **kwargs):
+        agent = CannedAgent(replies)
+        orch = Orchestrator(robot=fake_robot, agent=agent, tts=fake_tts,
+                            lexicon=lexicon, **kwargs)
+        return orch, agent
+
+    return _make

@@ -1,0 +1,53 @@
+# Mitram runtime configuration (DESIGN.md §7)
+
+robot:
+  backend: reachy          # reachy (real Lite over USB, or --sim daemon) | fake
+  mic_chunk_s: 0.08        # seconds of audio per microphone read
+
+models:
+  llm:
+    provider: ollama       # ollama | anthropic | bedrock (Option B, DESIGN §1.5)
+    host: "http://localhost:11434"
+    id: "qwen3-vl:8b"
+    keep_alive: "30m"      # keeps the model resident between turns (REQUIREMENTS §8)
+    temperature: 0.3
+  asr:
+    default: "mlx-community/whisper-large-v3-mlx"
+    sanskrit: null         # HF repo of a Sanskrit Whisper fine-tune, once selected (Phase 3)
+    backend: "mlx"
+    device: "mps"
+  tts:
+    engine: "indic-parler-tts"
+    model: "ai4bharat/indic-parler-tts"
+    fallback: "indic-tts-vits"
+    device: "mps"
+  wake:
+    engine: "openwakeword"
+    # Custom "mitram" model is trained in Phase 1. Until then any openWakeWord
+    # pretrained model name (e.g. "hey_jarvis_v0.1") can stand in for pipeline work.
+    model: "models/mitram.onnx"
+    threshold: 0.6
+  vad:
+    engine: "silero"       # silero | energy (dependency-free fallback)
+    min_speech_s: 0.3
+    min_silence_s: 0.8
+    max_utterance_s: 15.0
+
+agent:
+  deterministic_vision: false   # true = orchestrator-mediated capture_image (DESIGN §1.4)
+
+cloud_fallback:                 # FR-6.3 — no key/provider configured == feature absent
+  enabled: false
+  provider: null
+  model_id: null
+
+session:
+  silence_timeout_s: 30
+  max_reply_chars: 220
+
+lexicon:
+  db_path: "data/lexicon.db"
+
+logging:
+  dir: "logs"
+  debug: false
