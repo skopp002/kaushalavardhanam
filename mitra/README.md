@@ -125,6 +125,17 @@ References: [simulation setup guide](https://github.com/pollen-robotics/reachy_m
 
 ## Running
 
+### System requirements
+
+| Requirement | Why |
+|---|---|
+| **Apple Silicon Mac** (M1 or later; M1 Max is the reference machine) | The stack is built on Apple's GPU: Ollama uses Metal, ASR uses MLX (Apple-Silicon-only), TTS runs on MPS. Intel Macs and Rosetta builds fall back to CPU — replies take ~60 s instead of ~3 s |
+| **32 GB unified memory recommended** (16 GB minimum, expect memory pressure) | ~11.5 GB of models stay resident while running: Qwen3-VL ~6 GB + Whisper ~3 GB + TTS ~2 GB + wake/VAD (REQUIREMENTS §3) |
+| **~20 GB free disk** | One-time model downloads (LLM 6 GB, Whisper 3 GB, TTS 2 GB, small models) plus the ~5 GB venv |
+| **Python 3.10–3.12** in a project venv | reachy-mini supports 3.10–3.12; macOS system Python is too old |
+| **Internet for setup only** | Model downloads are one-time; at runtime the pipeline is fully offline |
+| **Microphone permission** for your terminal app | macOS will prompt on first mic access; without it the wake word hears silence |
+
 ### One-time installation
 
 Everything below assumes the venv is active (`source .venv/bin/activate` — see Setup above).
