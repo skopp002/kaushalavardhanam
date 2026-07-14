@@ -13,7 +13,9 @@ models:
     keep_alive: "30m"      # keeps the model resident between turns (REQUIREMENTS §8)
     temperature: 0.3
   asr:
-    default: "mlx-community/whisper-large-v3-mlx"
+    # turbo: half the download of large-v3 and 4-6x faster decoding at
+    # near-equal en/kn accuracy — the first latency lever in REQUIREMENTS §8
+    default: "mlx-community/whisper-large-v3-turbo"
     sanskrit: null         # HF repo of a Sanskrit Whisper fine-tune, once selected (Phase 3)
     backend: "mlx"
     device: "mps"

@@ -9,8 +9,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+# Quiet two harmless-but-scary warnings from the ML stack: the tokenizers
+# fork warning, and transformers' full-config dumps during Parler-TTS load.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 _ROOT = Path(__file__).resolve().parent
 
@@ -88,16 +94,6 @@ def check(config: dict) -> int:
 def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     logger = setup_logging(debug or config["logging"].get("debug", False))
 
-    if robot_backend == "fake":
-        from mitra.robot.reachy import FakeReachy
-
-        robot = FakeReachy()
-        logger.warning("using FakeReachy — no camera/audio/motion")
-    else:
-        from mitra.robot.reachy import ReachyRobot
-
-        robot = ReachyRobot(mic_chunk_s=config["robot"].get("mic_chunk_s", 0.08))
-
     from mitra.agent.agent import MitraAgent
     from mitra.agent.tools import build_tools
     from mitra.audio.asr import Transcriber
@@ -110,6 +106,14 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     models = config["models"]
     tts = SanskritTTS(model=models["tts"]["model"], device=models["tts"]["device"],
                       fallback_model=models["tts"].get("fallback", "facebook/mms-tts-hin"))
+    # Warm up TTS at startup for the same reason as ASR below: the Parler
+    # voice is a ~3.8 GB one-time download and a slow first load — without
+    # this, the robot goes silent exactly when it should first greet.
+    logger.info("warming up TTS (first run downloads the voice, ~3.8 GB one time)...")
+    try:
+        tts.synthesize("नमस्ते")
+    except Exception:
+        logger.exception("TTS warmup failed — continuing; speech will retry")
     wake = make_wake_detector(**models["wake"])
     if hasattr(wake, "warmup"):
         logger.info("warming up wake ASR (first run downloads whisper-tiny)...")
@@ -128,13 +132,31 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     # first use. Without this, the download would stall the FIRST conversation
     # turn for minutes with no feedback; here it happens at startup with a log
     # line, and later runs load from the local cache in seconds.
-    logger.info("warming up ASR (first run downloads Whisper, ~3 GB one time)...")
+    logger.info("warming up ASR (first run downloads Whisper, ~1.6 GB one time)...")
     import numpy as np
     try:
         asr.transcribe(np.zeros(8000, dtype=np.float32))  # 0.5 s of silence
     except Exception:
         logger.exception("ASR warmup failed — continuing; the first turn will retry")
     lexicon = LexiconStore(config["lexicon"]["db_path"])
+
+    # Connect to the robot ONLY after all model warmups: opening the daemon
+    # connection starts the microphone pipeline, and the multi-GB model loads
+    # above starve the audio threads badly enough that GStreamer floods the
+    # console with "Can't record audio fast enough" and drops samples. With
+    # the mic opened last, warmups happen in silence and listening starts
+    # with everything already resident.
+    if robot_backend == "fake":
+        from mitra.robot.reachy import FakeReachy
+
+        robot = FakeReachy()
+        logger.warning("using FakeReachy — no camera/audio/motion")
+    else:
+        from mitra.robot.reachy import ReachyRobot
+
+        logger.info("connecting to the robot daemon...")
+        robot = ReachyRobot(mic_chunk_s=config["robot"].get("mic_chunk_s", 0.08))
+
     agent = MitraAgent(models["llm"], build_tools(robot, tts))
 
     fallback_factory = None

@@ -44,6 +44,30 @@ If words like "model", "Ollama", and "agent" are new to you, read this first —
 
 **An "agent" is an LLM that can use tools.** A plain LLM can only write text. The Strands Agents SDK wraps our LLM in a loop where the model may also *call functions we hand it* — Mitra gives it four: `capture_image` (take a photo), `speak_sanskrit` (talk), `nod` (move the head), and `end_session` (go back to sleep). When you ask "what is this?", the model itself decides to call `capture_image`, looks at the frame, and answers. The robot is not an agent and never calls the model — it is the *body* (camera, microphones, speaker, motors); the agent is the *brain*; and a small state machine (the orchestrator) is the *nervous system* connecting them.
 
+## Component Roles — Who Does What, and When
+
+The architecture separates **sound** from **meaning**: everything left of the orchestrator in the diagrams deals in audio, everything right of it deals in text and images. Only one component actually *thinks*. Numbers refer to the sequence diagram above.
+
+**Reachy Mini + `reachy-mini` SDK — the body.** Microphones, camera, speaker, and head motors, reached through the daemon (real robot or simulator — identical API). It contains no intelligence: it streams audio in, plays audio out, moves when told. All hardware access goes through one wrapper (`src/robot/reachy.py`), which is why the same code runs against the simulator and the real robot.
+
+**Wake detector — the gatekeeper ear (steps 2–3).** A deliberately tiny listener that answers one question forever: *"was 'mitra' just said?"* Currently a small Whisper transcribing short bursts of speech and matching the word (no training needed); the production target is a custom openWakeWord model. Its existence is a privacy and efficiency decision: the big models stay idle — and nothing is transcribed or remembered — until you explicitly call the robot's name (मित्र, the vocative of मित्रम्).
+
+**VAD / segmenter — the utterance chopper (step 9).** Watches the audio stream for the moment you start and stop talking, and hands over exactly one complete utterance. Without it, ASR wouldn't know where a sentence begins or ends. An energy gate that self-calibrates to your room's noise floor, with Silero VAD as the higher-quality engine.
+
+**ASR (Whisper) — ears to text (step 10).** Converts the utterance's sound into the literal written words, in whatever language and script you spoke — nothing more. It doesn't understand, remember, or answer; it is the adapter between the microphone and the language model, which cannot hear. *Why is this needed at all?* Because our model is a **vision**-language model — "V" means images, not audio. Speech-native "omni" models exist that would ingest audio directly, but today they can't run locally, don't speak Sanskrit, and would bypass the text stage where our correctness guardrails live — so ASR stays (see DESIGN.md).
+
+**Language detector — the tag writer.** A few lines of script-range heuristics that label the transcript `en`, `kn`, or `sa`, so the model is told what it's reading and per-turn logs record the language mix.
+
+**Orchestrator — the nervous system.** A state machine (ASLEEP → WAKING → LISTENING → THINKING → SPEAKING) that routes everything and owns the guardrails. Two paths are deliberately *deterministic* — the nod on wake, and every reply passing through the validator before being spoken — so the quality of the model never decides whether the safety checks run. It has no intelligence either; it is traffic control.
+
+**Strands Agent — the brain's harness (step 11).** Wraps the LLM in an agentic loop and hands it four tools it may call: `capture_image`, `speak_sanskrit`, `nod`, `end_session`. It also owns conversation memory for the session and abstracts the model provider — swapping local Ollama for a cloud model (Option B) is a one-line change here, and nothing else in the system notices.
+
+**Qwen3-VL via Ollama — the only thinker (steps 12–13).** Idle until a transcript arrives; then it reads the tagged text plus the session history plus its Sanskrit-only instructions, optionally calls `capture_image` and *looks at the frame itself* (the same model does vision — there is no separate image recognizer), and composes the Sanskrit reply. Ollama is its serving layer: the local server that holds the ~6 GB of weights on the GPU and answers HTTP requests. One invocation per utterance; everything else in the system exists to feed it clean input or discipline its output.
+
+**Validator + lexicon — the discipline (step 14).** The validator checks each reply really is Devanagari-dominant and short, retrying once with a corrective prompt, then falling back to a safe phrase — a cheap guard against a small local model drifting into English. The lexicon is the accuracy backstop: once a human verifies an object's Sanskrit name, the stored name **always overrides** whatever the model generates, and new model-coined names are queued for review (`mitra-lexicon`). This is the main compensation for local-model Sanskrit quality.
+
+**TTS (Indic Parler-TTS) — text to voice (steps 15–16).** Turns the validated Devanagari sentence into a spoken waveform (Sanskrit is its top-rated language), which the robot's speaker plays. If the gated model isn't accessible yet it falls back automatically to an ungated Hindi VITS voice. Like ASR in reverse — and like ASR, it neither understands nor invents anything.
+
 ## Documents
 
 | Doc | Contents |
@@ -173,7 +197,7 @@ Skip this and Mitra still speaks: it automatically falls back to an ungated Hind
 
 Remember `source .venv/bin/activate` in every terminal. When all three are up: say **"hey mitra"** near the microphone → the robot nods and greets you with नमस्ते → speak English, Kannada, or Sanskrit → it replies in spoken Sanskrit. In simulation, the robot's microphone and speaker are your Mac's, and its camera sees the simulated table (duck, croissant, apple — all three have verified lexicon entries).
 
-> **First run is slow — by design, up front.** At startup Mitra *warms up* its speech models: it runs each ASR engine once on silence so the one-time downloads (whisper-tiny for the wake word, then Whisper large-v3, ~3 GB, for transcription) happen right away with a "warming up" log line — instead of silently stalling your first question for minutes. The TTS voice (~2 GB) still downloads on the first reply. After these one-time downloads the whole pipeline is local — it works with Wi-Fi off (the design goal).
+> **First run is slow — by design, up front.** At startup Mitra *warms up* its speech models: it runs each ASR engine once on silence so the one-time downloads (whisper-tiny for the wake word, then Whisper large-v3-turbo, ~1.6 GB, for transcription) happen right away with a "warming up" log line — instead of silently stalling your first question for minutes. The TTS voice (~2 GB) still downloads on the first reply. After these one-time downloads the whole pipeline is local — it works with Wi-Fi off (the design goal).
 
 ### Development commands
 
