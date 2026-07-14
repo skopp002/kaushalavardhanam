@@ -172,6 +172,7 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
         wake=wake, segmenter=segmenter, asr=asr,
         turn_logger=TurnLogger(config["logging"]["dir"], logger),
         logger=logger,
+        gestures=config["robot"].get("gestures", True),
         silence_timeout_s=config["session"]["silence_timeout_s"],
         max_reply_chars=config["session"]["max_reply_chars"],
         fallback_agent_factory=fallback_factory,

@@ -51,7 +51,7 @@ class Orchestrator:
                  turn_logger=None, logger: logging.Logger | None = None,
                  silence_timeout_s: float = 30.0,
                  max_reply_chars: int = validator.MAX_REPLY_CHARS,
-                 fallback_agent_factory=None):
+                 fallback_agent_factory=None, gestures: bool = True):
         self.robot = robot
         self.agent = agent
         self.tts = tts
@@ -61,6 +61,7 @@ class Orchestrator:
         self.asr = asr
         self.turn_logger = turn_logger
         self.logger = logger or logging.getLogger("mitra")
+        self.gestures = gestures
         self.silence_timeout_s = silence_timeout_s
         self.max_reply_chars = max_reply_chars
         self._fallback_agent_factory = fallback_agent_factory
@@ -119,6 +120,11 @@ class Orchestrator:
 
     # ---------------------------------------------------------- transitions
 
+    def _pose(self, name: str) -> None:
+        """State-feedback gesture (FR-5.3): best-effort, config-gated."""
+        if self.gestures and hasattr(self.robot, "pose"):
+            self.robot.pose(name)
+
     def _on_wake(self) -> None:
         self.state = State.WAKING
         self.logger.info("wake word detected")
@@ -128,6 +134,7 @@ class Orchestrator:
     def _to_listening(self) -> None:
         self.state = State.LISTENING
         self._last_activity = time.monotonic()
+        self._pose("listening")               # antennas perk up: "your turn"
         if self.segmenter:
             self.segmenter.reset()
 
@@ -139,6 +146,7 @@ class Orchestrator:
 
     def _go_to_sleep(self) -> None:
         self.state = State.ASLEEP
+        self._pose("asleep")                  # head droops: session over
         self._sleep_after_speaking = False
         self.agent.reset()                    # context is per-session (FR-3.3)
         if self.wake:
@@ -149,6 +157,7 @@ class Orchestrator:
 
     def _on_utterance(self, payload) -> None:
         self.state = State.THINKING
+        self._pose("thinking")                # head tilt: "processing..."
         self._last_activity = time.monotonic()
         tl = self.turn_logger
         if tl:
@@ -180,6 +189,7 @@ class Orchestrator:
         tl = self.turn_logger
         if tl:
             tl.set("reply", reply)
+        self._pose("neutral")                 # face forward while speaking
         if tl:
             with tl.stage("tts"):
                 self._speak(reply)

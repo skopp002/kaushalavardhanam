@@ -147,6 +147,32 @@ class ReachyRobot:
         self._mini.goto_target(head=down, duration=0.3)
         self._mini.goto_target(head=self._create_head_pose(), duration=0.3)
 
+    # State-feedback poses (FR-5.3 extension): head angles in degrees,
+    # antennas in radians. Tune freely — these only signal state, they carry
+    # no meaning to the pipeline.
+    POSES = {
+        "neutral":   {"head": {}, "antennas": [0.0, 0.0]},
+        "listening": {"head": {"pitch": -6}, "antennas": [0.5, -0.5]},   # perked up
+        "thinking":  {"head": {"roll": 14}, "antennas": [0.1, -0.6]},    # quizzical tilt
+        "asleep":    {"head": {"pitch": 20}, "antennas": [1.1, -1.1]},   # drooped
+    }
+
+    def pose(self, name: str, duration: float = 0.5) -> None:
+        """Move to a named state pose without blocking the caller."""
+        spec = self.POSES[name]
+
+        def _move():
+            try:
+                self._mini.goto_target(
+                    head=self._create_head_pose(**spec["head"], degrees=True),
+                    antennas=spec["antennas"],
+                    duration=duration,
+                )
+            except Exception:
+                pass  # a missed gesture must never disturb the pipeline
+
+        threading.Thread(target=_move, daemon=True).start()
+
     def close(self) -> None:
         self._closed.set()
         self._stop_playback.set()
@@ -166,6 +192,7 @@ class FakeReachy:
         self._mic_sr = mic_samplerate
         self.frame = np.zeros((480, 640, 3), dtype=np.uint8)
         self.nods = 0
+        self.poses: list[str] = []
         self.played: list[np.ndarray] = []
         self.stops = 0
         self.closed = False
@@ -205,6 +232,9 @@ class FakeReachy:
     # head
     def nod(self) -> None:
         self.nods += 1
+
+    def pose(self, name: str, duration: float = 0.5) -> None:
+        self.poses.append(name)
 
     def close(self) -> None:
         self.closed = True

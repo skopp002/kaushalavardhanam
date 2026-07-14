@@ -137,3 +137,25 @@ def test_run_loop_stops_cleanly(make_orchestrator):
     orch.stop()
     thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+def test_state_gestures_follow_transitions(make_orchestrator, fake_robot):
+    orch, _ = make_orchestrator(replies=[SA_REPLY])
+    orch.handle_event(Event("wake"))
+    orch.handle_event(Event("playback_done"))          # WAKING -> LISTENING
+    assert fake_robot.poses[-1] == "listening"
+    orch.handle_event(Event("utterance", "hello"))     # -> THINKING -> SPEAKING
+    assert "thinking" in fake_robot.poses
+    assert fake_robot.poses[-1] == "neutral"           # face forward to speak
+    orch.state = State.LISTENING
+    orch._last_activity = time.monotonic() - 31
+    orch.handle_event(Event("tick"))                   # timeout -> ASLEEP
+    assert fake_robot.poses[-1] == "asleep"
+
+
+def test_gestures_can_be_disabled(make_orchestrator, fake_robot):
+    orch, _ = make_orchestrator(replies=[SA_REPLY], gestures=False)
+    orch.handle_event(Event("wake"))
+    orch.handle_event(Event("playback_done"))
+    orch.handle_event(Event("utterance", "hello"))
+    assert fake_robot.poses == []

@@ -3,6 +3,8 @@
 robot:
   backend: reachy          # reachy (real Lite over USB, or --sim daemon) | fake
   mic_chunk_s: 0.08        # seconds of audio per microphone read
+  gestures: true           # state poses: antennas perk when listening, head
+                           # tilts while thinking, droops when asleep (FR-5.3)
 
 models:
   llm:
