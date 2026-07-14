@@ -25,7 +25,7 @@ class EnergySegmenter:
     on one setup is deaf on another. Pass ``threshold`` to pin it instead.
     """
 
-    _FLOOR_RATIO = 3.0
+    _FLOOR_RATIO = 2.5
 
     def __init__(self, samplerate: int = TARGET_SAMPLERATE,
                  threshold: float | None = None, min_gate: float = 0.004,

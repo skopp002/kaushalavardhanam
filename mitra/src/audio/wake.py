@@ -14,11 +14,14 @@ Two engines behind one ``process(chunk) -> bool`` interface:
 
 from __future__ import annotations
 
+import logging
 import re
 
 import numpy as np
 
 from .vad import EnergySegmenter
+
+logger = logging.getLogger("mitra")
 
 
 class WakeWordDetector:
@@ -93,7 +96,13 @@ class TranscriptWakeDetector:
             return False
         text = self._transcribe(utterance)
         cleaned = re.sub(r"[^\wऀ-ॿ]+", "", text.lower())
-        return any(v in cleaned for v in self._variants)
+        woke = any(v in cleaned for v in self._variants)
+        # Visible feedback in --debug: without this, a failed wake check is
+        # indistinguishable from "heard nothing at all".
+        logger.debug("wake check (%.1fs audio) heard %r -> %s",
+                     len(utterance) / 16000, text.strip(),
+                     "WAKE" if woke else "no match")
+        return woke
 
     def warmup(self) -> None:
         """Trigger the one-time whisper download/load before the run loop, so

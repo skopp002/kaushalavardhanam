@@ -17,6 +17,7 @@ from pathlib import Path
 # fork warning, and transformers' full-config dumps during Parler-TTS load.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")  # no "Fetching 4 files" spam
 
 _ROOT = Path(__file__).resolve().parent
 

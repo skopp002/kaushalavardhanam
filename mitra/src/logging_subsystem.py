@@ -24,6 +24,8 @@ def setup_logging(debug: bool = False) -> logging.Logger:
         )
         logger.addHandler(handler)
     logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    for noisy in ("parler_tts", "transformers", "urllib3", "httpx"):
+        logging.getLogger(noisy).setLevel(logging.ERROR)
     return logger
 
 
