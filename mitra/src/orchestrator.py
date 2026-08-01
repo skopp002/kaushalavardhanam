@@ -96,6 +96,7 @@ class Orchestrator:
             except Exception:  # FR-6.4: log, apologize, keep the session alive
                 self.logger.exception("error handling %s in %s", event.kind, self.state)
                 if self.state == State.THINKING:
+                    self._emotion("confused1")
                     self._speak(prompts.APOLOGY_RETRY)
                     self.state = State.SPEAKING
 
@@ -132,10 +133,18 @@ class Orchestrator:
         if self.gestures and hasattr(self.robot, "pose"):
             self.robot.pose(name)
 
+    def _emotion(self, name: str) -> None:
+        """Recorded emotion from Pollen's library (FR-5.3 extension):
+        best-effort, config-gated, purely additive to _pose() above — fired
+        only at occasional "moments" (wake, sleep, confusion), not every turn."""
+        if self.gestures and hasattr(self.robot, "play_emotion"):
+            self.robot.play_emotion(name)
+
     def _on_wake(self) -> None:
         self.state = State.WAKING
         self.logger.info("wake word detected")
         self.robot.nod()                      # deterministic (DESIGN §1.4)
+        self._emotion("welcoming1")
         self._speak(prompts.GREETING)         # → playback_done → LISTENING
 
     def _to_listening(self) -> None:
@@ -154,6 +163,7 @@ class Orchestrator:
     def _go_to_sleep(self) -> None:
         self.state = State.ASLEEP
         self._pose("asleep")                  # head droops: session over
+        self._emotion("mini-deep-sleep")
         self._sleep_after_speaking = False
         self.agent.reset()                    # context is per-session (FR-3.3)
         if self.wake:
@@ -188,6 +198,7 @@ class Orchestrator:
             reply, session_end = self._generate_reply(message, explain_en)
         except Exception:
             self.logger.exception("agent failure (FR-6.4)")
+            self._emotion("confused1")
             reply, session_end = prompts.APOLOGY_RETRY, False
 
         if session_end:
@@ -322,6 +333,12 @@ class Orchestrator:
         time.sleep(0.05)
         while self.robot.speaker_busy() and not self._stop.is_set():
             time.sleep(0.05)
+        # Discard whatever the mic captured during playback before resuming
+        # listening — with mic_source="built_in" there's no echo cancellation,
+        # so without this the robot's own voice gets fed back in as if it
+        # were the next user utterance.
+        if hasattr(self.robot, "flush_mic"):
+            self.robot.flush_mic()
         self.events.put(Event("playback_done"))
 
     # ------------------------------------------------------------ audio I/O

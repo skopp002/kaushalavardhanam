@@ -176,3 +176,40 @@ def test_plain_english_question_still_requires_sanskrit(make_orchestrator, fake_
     orch.handle_event(Event("utterance", "Tell me about the sun."))
     assert "[explain_in_english]" not in agent.calls[0]
     assert fake_tts.spoken == [prompts.SAFE_FALLBACK]  # English reply rejected
+
+
+def test_wake_plays_welcoming_emotion(make_orchestrator, fake_robot):
+    orch, _ = make_orchestrator()
+    orch.handle_event(Event("wake"))
+    assert fake_robot.emotions == ["welcoming1"]
+
+
+def test_sleep_plays_deep_sleep_emotion(make_orchestrator, fake_robot):
+    orch, _ = make_orchestrator(silence_timeout_s=30)
+    orch.state = State.LISTENING
+    orch._last_activity = time.monotonic() - 31
+    orch.handle_event(Event("tick"))
+    assert "mini-deep-sleep" in fake_robot.emotions
+
+
+def test_agent_exception_plays_confused_emotion(make_orchestrator, fake_robot):
+    class ExplodingAgent:
+        def converse(self, message):
+            raise RuntimeError("ollama down")
+
+        def reset(self):
+            pass
+
+    orch, _ = make_orchestrator()
+    orch.agent = ExplodingAgent()
+    orch.state = State.LISTENING
+    orch.handle_event(Event("utterance", "hello"))
+    assert fake_robot.emotions == ["confused1"]
+
+
+def test_emotions_disabled_alongside_gestures(make_orchestrator, fake_robot):
+    orch, _ = make_orchestrator(replies=[SA_REPLY], gestures=False)
+    orch.handle_event(Event("wake"))
+    orch.handle_event(Event("playback_done"))
+    orch.handle_event(Event("utterance", "hello"))
+    assert fake_robot.emotions == []

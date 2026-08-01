@@ -33,10 +33,21 @@ from __future__ import annotations
 import importlib.util
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
 import time
+
+# macOS's `say` engine doesn't silently skip emoji — it speaks their Unicode
+# names ("smiling face with smiling eyes and rosy cheeks"), which is what was
+# leaking into replies. Stripped from the text that actually reaches `say`
+# only; the console print keeps the model's original text, emoji and all.
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
+    "\U00002700-\U000027BF\U0001F900-\U0001F9FF\U00002B00-\U00002BFF"
+    "\U0000FE0F\U0000200D]+"
+)
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -58,9 +69,11 @@ SILENCE_TIMEOUT_S = 30
 SYSTEM_PROMPT = (
     "You are a friendly, helpful voice assistant running on a small desktop "
     "robot with a camera. Keep replies short — one or two spoken sentences — "
-    "since they will be read aloud. Be warm and conversational. When the user "
-    "shows you something or asks what an object is, call the capture_image "
-    "tool and answer from what you see."
+    "since they will be read aloud by text-to-speech. Never use emojis or "
+    "emoticons: a TTS engine reads them out by name instead of skipping them, "
+    "which sounds broken. Be warm and conversational using words only. When "
+    "the user shows you something or asks what an object is, call the "
+    "capture_image tool and answer from what you see."
 )
 
 
@@ -84,15 +97,21 @@ def main() -> None:
         (robot.speaker_play handles resampling to the robot's output rate —
         same call Mitra's own TTS makes, see src/robot/reachy.py)."""
         print(f"  Mitra: {text}")
+        speech_text = _EMOJI_RE.sub("", text).strip() or text
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             path = f.name
         try:
-            subprocess.run(["say", "-o", path, "--data-format=LEI16@22050", text],
-                          check=True)
+            subprocess.run(
+                ["say", "-o", path, "--data-format=LEI16@22050", speech_text],
+                check=True)
             wav, sr = sf.read(path, dtype="float32", always_2d=False)
             robot.speaker_play(wav, sr, block=True)
         finally:
             os.unlink(path)
+            # Discard whatever the mic captured while the robot was talking —
+            # mic_source="built_in" has no echo cancellation, so without this
+            # the robot's own voice gets fed back in as the "next" utterance.
+            robot.flush_mic()
 
     print("loading wake detector, VAD, ASR, agent...")
     wake = TranscriptWakeDetector(phrase=WAKE_PHRASE)
@@ -127,9 +146,14 @@ def main() -> None:
                 if wake.process(chunk):
                     print("* wake word heard *")
                     robot.nod()
+                    # block=True: keeps this sequential with the spoken
+                    # greeting below rather than overlapping two sounds at
+                    # once (both play through the same robot speaker)
+                    robot.play_emotion("welcoming1", block=True)
                     robot.pose("neutral")   # face forward to speak the greeting
                     say("Hi! What can I help with?")
                     robot.pose("listening")  # antennas perk up: your turn
+                    robot.flush_mic()        # discard any noise from the above
                     listening = True
                     last_activity = time.monotonic()
                     segmenter.reset()
@@ -138,6 +162,7 @@ def main() -> None:
             if time.monotonic() - last_activity > SILENCE_TIMEOUT_S:
                 print("* silence timeout — back to sleep *")
                 robot.pose("asleep")
+                robot.play_emotion("mini-deep-sleep")
                 listening = False
                 agent.reset()
                 wake.reset()
@@ -159,6 +184,7 @@ def main() -> None:
                 reply = agent.converse(f"[lang={lang}] {text}")
             except Exception as e:
                 print(f"  (agent error: {e})")
+                robot.play_emotion("confused1")
                 reply = "Sorry, I had trouble with that — could you try again?"
             robot.pose("neutral")  # face forward to speak
             say(reply)

@@ -57,6 +57,8 @@ class ReachyRobot:
         self._mic_buf: deque[np.ndarray] = deque()
         self._mic_samples = 0
         self._mic_ready = threading.Condition()
+        self._emotions_lib = None  # lazy: only load the ~85-move library if used
+        self._dances_lib = None
 
         if mic_source == "built_in":
             self._in_sr = 16000  # matches mitra.audio.TARGET_SAMPLERATE
@@ -151,6 +153,16 @@ class ReachyRobot:
             self._mic_samples -= taken
         return np.concatenate(chunks)
 
+    def flush_mic(self) -> None:
+        """Discard whatever's currently buffered. Call this right after
+        speaker playback ends: with mic_source="built_in" there's no echo
+        cancellation on the raw mic stream, so it keeps recording the robot's
+        own voice while it talks — without a flush, that gets drained and fed
+        back in as if it were a new user utterance the moment playback stops."""
+        with self._mic_ready:
+            self._mic_buf.clear()
+            self._mic_samples = 0
+
     # --- speaker ---
 
     def speaker_play(self, wav: np.ndarray, samplerate: int, block: bool = True) -> None:
@@ -215,6 +227,66 @@ class ReachyRobot:
 
         threading.Thread(target=_move, daemon=True).start()
 
+    # Recorded emotion/dance library (FR-5.3 extension, additive — POSES
+    # above is untouched): Pollen's official ~85-move "emotions" and ~19-move
+    # "dances" datasets, pre-downloaded by the daemon at startup. Fuller,
+    # slower animations (a few seconds, often with sound) than the instant
+    # POSES angles — better suited to occasional "moments" (wake greeting,
+    # falling asleep, confusion) than to firing on every conversational turn.
+    EMOTION_LIBRARY = "pollen-robotics/reachy-mini-emotions-library"
+    DANCE_LIBRARY = "pollen-robotics/reachy-mini-dances-library"
+
+    def _emotions(self):
+        if self._emotions_lib is None:
+            from reachy_mini.motion.recorded_move import RecordedMoves
+
+            self._emotions_lib = RecordedMoves(self.EMOTION_LIBRARY)
+        return self._emotions_lib
+
+    def _dances(self):
+        if self._dances_lib is None:
+            from reachy_mini.motion.recorded_move import RecordedMoves
+
+            self._dances_lib = RecordedMoves(self.DANCE_LIBRARY)
+        return self._dances_lib
+
+    def list_emotions(self) -> list[str]:
+        """Names playable with play_emotion(), e.g. 'welcoming1', 'curious1',
+        'mini-deep-sleep' — see pollen-robotics/reachy-mini-emotions-library."""
+        return self._emotions().list_moves()
+
+    def list_dances(self) -> list[str]:
+        """Names playable with play_dance() — see
+        pollen-robotics/reachy-mini-dances-library."""
+        return self._dances().list_moves()
+
+    def play_emotion(self, name: str, block: bool = False, sound: bool = True) -> None:
+        """Play one of the recorded emotions by name (list_emotions())."""
+        self._play_recorded(self._emotions(), name, block, sound)
+
+    def play_dance(self, name: str, block: bool = False, sound: bool = True) -> None:
+        """Play one of the recorded dances by name (list_dances())."""
+        self._play_recorded(self._dances(), name, block, sound)
+
+    def _play_recorded(self, library, name: str, block: bool, sound: bool) -> None:
+        import asyncio
+
+        try:
+            move = library.get(name)
+        except Exception:
+            return  # unknown/uncached move must never disturb the pipeline
+
+        def _run():
+            try:
+                asyncio.run(self._mini.async_play_move(move, sound=sound))
+            except Exception:
+                pass
+
+        if block:
+            _run()
+        else:
+            threading.Thread(target=_run, daemon=True).start()
+
     def close(self) -> None:
         self._closed.set()
         self._stop_playback.set()
@@ -238,6 +310,9 @@ class FakeReachy:
         self.frame = np.zeros((480, 640, 3), dtype=np.uint8)
         self.nods = 0
         self.poses: list[str] = []
+        self.emotions: list[str] = []
+        self.dances: list[str] = []
+        self.flushes = 0
         self.played: list[np.ndarray] = []
         self.stops = 0
         self.closed = False
@@ -262,6 +337,10 @@ class FakeReachy:
             return self._mic_queue.popleft()
         return np.zeros(0, dtype=np.float32)
 
+    def flush_mic(self) -> None:
+        self.flushes += 1
+        self._mic_queue.clear()
+
     # speaker
     def speaker_play(self, wav: np.ndarray, samplerate: int, block: bool = True) -> None:
         self.played.append(np.asarray(wav))
@@ -280,6 +359,22 @@ class FakeReachy:
 
     def pose(self, name: str, duration: float = 0.5) -> None:
         self.poses.append(name)
+
+    # recorded emotion/dance library (fake catalogue for tests)
+    FAKE_EMOTIONS = ["welcoming1", "mini-deep-sleep", "confused1", "curious1"]
+    FAKE_DANCES = ["simple_nod", "yeah_nod"]
+
+    def list_emotions(self) -> list[str]:
+        return list(self.FAKE_EMOTIONS)
+
+    def list_dances(self) -> list[str]:
+        return list(self.FAKE_DANCES)
+
+    def play_emotion(self, name: str, block: bool = False, sound: bool = True) -> None:
+        self.emotions.append(name)
+
+    def play_dance(self, name: str, block: bool = False, sound: bool = True) -> None:
+        self.dances.append(name)
 
     def close(self) -> None:
         self.closed = True
