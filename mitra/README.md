@@ -1,6 +1,6 @@
 # Mitra (मित्रम्) — Sanskrit-Speaking Robot on Reachy Mini
 
-Mitra ("friend" in Sanskrit) is an interactive desktop robot built on the **Reachy Mini Lite**. Say **"mitra"** to wake it, show it any object and it names the object in Sanskrit, and converse with it — it understands English, Kannada, or Sanskrit, and always replies in spoken Sanskrit. All inference runs **locally** on the host Mac with open-source models; no internet is needed at runtime.
+Mitra ("friend" in Sanskrit) is an interactive desktop robot built on the **Reachy Mini Lite**. Say **"mitra"** to wake it, show it any object and it names the object in Sanskrit, and converse with it — it understands English, Kannada, or Sanskrit, and replies in spoken Sanskrit — and if you ask *"explain that in English"*, it explains the exchange in English before returning to Sanskrit. All inference runs **locally** on the host Mac with open-source models; no internet is needed at runtime.
 
 **📺 Video walkthrough — setting up this repo from scratch:**
 
@@ -153,6 +153,53 @@ The `reachy-mini` SDK ships a **MuJoCo simulation backend**: the daemon started 
 
 References: [simulation setup guide](https://github.com/pollen-robotics/reachy_mini/blob/main/docs/source/platforms/simulation/get_started.md) · [SDK installation](https://github.com/pollen-robotics/reachy_mini/blob/main/docs/source/SDK/installation.md) · [Python SDK media APIs](https://github.com/pollen-robotics/reachy_mini/blob/main/docs/source/SDK/python-sdk.md)
 
+## Testing on the Real Reachy Mini Lite
+
+Because all hardware access goes through `src/robot/reachy.py`, switching from simulator to hardware is a one-line change — no Mitra code differs. Two things *do* differ physically: the camera and microphones are now the **robot's own** USB devices (not your Mac's), and the motors need real power.
+
+1. **Power and connect:** plug the **7 V/5 A power supply** into the robot (USB alone does not power the motors — the most common "robot won't move" cause) and connect the USB data cable to your Mac. If you have Reachy Mini Control installed, quit it — it and a manually-run daemon can't hold the robot at the same time.
+
+2. **Start the real daemon** (no `mjpython`, no `--sim` — this replaces the simulator terminal):
+
+   ```bash
+   source .venv/bin/activate
+   reachy-mini-daemon
+   ```
+
+   Verify at <http://localhost:8000/docs>. Unlike the simulator logs, you should **not** see `No Reachy Mini Audio USB device found!` — if you do, the daemon isn't seeing the robot's audio board; unplug/replug the USB cable and restart the daemon.
+
+3. **Run the existing hardware smoke tests unmodified** — same file, same assertions, now against real hardware:
+
+   ```bash
+   .venv/bin/python -m pytest tests/hw/ -v -s
+   ```
+
+   Watch the physical robot for `test_nod_moves_head` and listen for `test_speaker_tone`; `test_camera_frame` saves a real photo of whatever the robot is pointed at. If a motor test fails with "Missing motor" or "Overload Error", see Pollen's [motor diagnosis guide](https://github.com/pollen-robotics/reachy_mini/blob/main/docs/source/troubleshooting/motors_diagnosis.md) — don't touch the robot's head while it's moving.
+
+4. **Re-check the wake gate for the robot's real mic** (it has different gain than your Mac's built-in mic):
+
+   ```bash
+   .venv/bin/python scripts/wake_probe.py
+   ```
+
+   **If "hey mitra" still doesn't trigger,** record one clip and replay it offline instead of guessing live — this isolates mic-volume problems from mis-transcription problems, and shows exactly what Whisper heard:
+
+   ```bash
+   python scripts/test_audio.py --record 3 --out clips/hello.wav --analyze
+   ```
+
+   Prints the clip's RMS/peak against the speech gate, what the wake detector (whisper-tiny) transcribed and whether it matched, and what the main ASR (whisper-large-v3-turbo) heard. Re-run `--file clips/hello.wav` anytime to test detector tuning without re-recording; it also accepts recordings from anywhere else (e.g. a phone voice memo).
+
+5. **Run Mitra for real:**
+
+   ```bash
+   python main.py --debug
+   ```
+
+   Say **"hey mitra"** at conversational distance (≤ 2 m, per FR-1.4) — this is the first time the acceptance criteria deferred from simulation (wake accuracy, real camera optics/lighting, actual speaker volume, sound-source acoustics) are actually measurable. Everything else — the conversation tests, vision turns, barge-in, "explain in English" — follows the same steps as in simulation.
+
+Reference: [Reachy Mini Lite setup guide](https://github.com/pollen-robotics/reachy_mini/blob/main/docs/source/platforms/reachy_mini_lite/get_started.md) · [Troubleshooting & FAQ](https://github.com/pollen-robotics/reachy_mini/blob/main/docs/source/troubleshooting.md)
+
 ## Running
 
 ### System requirements
@@ -206,6 +253,23 @@ Remember `source .venv/bin/activate` in every terminal. When all three are up: s
 **Reading Mitra's body language** (state gestures, `robot.gestures` in config, on by default): antennas perk up and head lifts = *listening, your turn*; head tilts sideways = *thinking about what you said*; face forward = *speaking*; head and antennas droop = *asleep, say "hey mitra" to wake*. Plus the quick nod at the moment the wake word is recognized. Identical on the simulator and the real robot — the pose angles live in `ReachyRobot.POSES` (`src/robot/reachy.py`) if you want to tune the personality. In simulation, the robot's microphone and speaker are your Mac's, and its camera sees the simulated table (duck, croissant, apple — all three have verified lexicon entries).
 
 > **First run is slow — by design, up front.** At startup Mitra *warms up* its speech models: it runs each ASR engine once on silence so the one-time downloads (whisper-tiny for the wake word, then Whisper large-v3-turbo, ~1.6 GB, for transcription) happen right away with a "warming up" log line — instead of silently stalling your first question for minutes. The TTS voice (~2 GB) still downloads on the first reply. After these one-time downloads the whole pipeline is local — it works with Wi-Fi off (the design goal).
+
+### Just want to talk to it in English? (`tests/mini_conversation_app.py`)
+
+Mitra's full pipeline always replies in Sanskrit — that's the point of the project, not a bug. If you'd rather have a plain English conversation with the robot with no Devanagari involved, there's a separate, minimal standalone script for exactly that. It's additive: it doesn't touch or replace anything in Mitra's own pipeline (no lexicon, no Devanagari validator, no state gestures, no vision, no tool-calling) — it just reuses the same wake word, mic capture, VAD, ASR, and LLM connection as plain library calls, with a generic English system prompt and macOS's built-in `say` command for speech output (through the Mac's speakers, zero extra downloads).
+
+```bash
+# terminal 1 (if not already running)
+reachy-mini-daemon                       # or the --sim command from above
+
+# terminal 2
+source .venv/bin/activate
+python tests/mini_conversation_app.py
+```
+
+Say **"hey mitra"**, then just talk — plain English in, plain English out. Useful as a quick sanity check of the wake/mic/LLM chain on its own, or as a starting template if you want to build something that isn't Sanskrit-focused on top of the same plumbing.
+
+> **Note:** listens through the Mac's own built-in microphone rather than the robot's, since the robot's onboard mic currently returns silence on macOS 26 (Tahoe) due to a Core Audio regression affecting multichannel USB audio devices ([pollen-robotics/reachy_mini#820](https://github.com/pollen-robotics/reachy_mini/issues/820) — not specific to this project). Camera, speaker, and head motion are unaffected and still go through the robot normally. Set `robot.mic_source: robot` back in `config.yaml` once that's fixed upstream.
 
 ### Development commands
 

@@ -23,7 +23,15 @@ _PLAYBACK_CHUNK_S = 0.25  # push audio in small chunks so barge-in can stop it
 class ReachyRobot:
     """Connects to the reachy-mini daemon (real robot or --sim)."""
 
-    def __init__(self, mic_chunk_s: float = 0.08):
+    def __init__(self, mic_chunk_s: float = 0.08, mic_source: str = "robot",
+                 built_in_mic_device: str = "MacBook Pro Microphone"):
+        """mic_source: "robot" (default) reads the robot's own mic through the
+        SDK. "built_in" instead captures from a Mac input device via
+        sounddevice/PortAudio — a workaround for a macOS 26 (Tahoe) Core Audio
+        regression that returns all-zero samples for the robot's multichannel
+        USB mic (pollen-robotics/reachy_mini#820). Camera, speaker, and head
+        motion are unaffected and always go through the robot regardless.
+        """
         try:
             from reachy_mini import ReachyMini
             from reachy_mini.utils import create_head_pose
@@ -36,20 +44,29 @@ class ReachyRobot:
         self._mini = ReachyMini()
         self._mini.media.start_recording()
         self._mini.media.start_playing()
-        self._in_sr = int(self._mini.media.get_input_audio_samplerate())
         self._out_sr = int(self._mini.media.get_output_audio_samplerate())
         self._mic_chunk_s = mic_chunk_s
+        self._mic_source = mic_source
         self._stop_playback = threading.Event()
         self._playing = threading.Event()
-        # Dedicated drain thread: the SDK's appsink queue holds only ~2 s, so
-        # the mic must be drained at realtime even while consumers (wake ASR,
-        # Whisper) block — otherwise GStreamer drops samples.
+        # Ring buffer + drain thread(s) feed mic_read() identically regardless
+        # of source — the SDK's appsink queue holds only ~2 s, so the mic must
+        # be drained at realtime even while consumers (wake ASR, Whisper)
+        # block, otherwise GStreamer drops samples.
         self._closed = threading.Event()
         self._mic_buf: deque[np.ndarray] = deque()
         self._mic_samples = 0
-        self._mic_cap = 30 * self._in_sr  # ring: keep at most 30 s
         self._mic_ready = threading.Condition()
-        threading.Thread(target=self._mic_drain_loop, daemon=True).start()
+
+        if mic_source == "built_in":
+            self._in_sr = 16000  # matches mitra.audio.TARGET_SAMPLERATE
+            self._start_built_in_mic(built_in_mic_device)
+        elif mic_source == "robot":
+            self._in_sr = int(self._mini.media.get_input_audio_samplerate())
+            self._mic_cap = 30 * self._in_sr  # ring: keep at most 30 s
+            threading.Thread(target=self._mic_drain_loop_robot, daemon=True).start()
+        else:
+            raise ValueError(f"unknown mic_source: {mic_source!r}")
 
     # --- camera ---
 
@@ -63,7 +80,15 @@ class ReachyRobot:
     def mic_samplerate(self) -> int:
         return self._in_sr
 
-    def _mic_drain_loop(self) -> None:
+    def _push_mic_chunk(self, mono: np.ndarray) -> None:
+        with self._mic_ready:
+            self._mic_buf.append(mono)
+            self._mic_samples += len(mono)
+            while self._mic_samples > self._mic_cap:  # drop oldest
+                self._mic_samples -= len(self._mic_buf.popleft())
+            self._mic_ready.notify_all()
+
+    def _mic_drain_loop_robot(self) -> None:
         """Continuously pull ~10 ms buffers from the SDK into our ring buffer.
 
         get_audio_sample() returns ONE buffered chunk per call (or None), so
@@ -81,12 +106,29 @@ class ReachyRobot:
             mono = np.asarray(samples, dtype=np.float32)
             if mono.ndim == 2:
                 mono = mono.mean(axis=1)
-            with self._mic_ready:
-                self._mic_buf.append(mono)
-                self._mic_samples += len(mono)
-                while self._mic_samples > self._mic_cap:  # drop oldest
-                    self._mic_samples -= len(self._mic_buf.popleft())
-                self._mic_ready.notify_all()
+            self._push_mic_chunk(mono)
+
+    def _start_built_in_mic(self, device_name: str) -> None:
+        try:
+            import sounddevice as sd
+        except ImportError as e:
+            raise ImportError(
+                "mic_source='built_in' needs sounddevice. "
+                "Install with: pip install sounddevice"
+            ) from e
+        self._mic_cap = 30 * self._in_sr
+
+        def callback(indata, frames, time_info, status):  # noqa: ARG001
+            mono = np.asarray(indata, dtype=np.float32)
+            if mono.ndim == 2:
+                mono = mono.mean(axis=1)
+            self._push_mic_chunk(mono)
+
+        self._built_in_stream = sd.InputStream(
+            device=device_name, channels=1, samplerate=self._in_sr,
+            blocksize=int(self._in_sr * 0.02), callback=callback,
+        )
+        self._built_in_stream.start()
 
     def mic_read(self) -> np.ndarray:
         """Mono float32 chunk of ~mic_chunk_s from the ring buffer; blocks up
@@ -178,6 +220,9 @@ class ReachyRobot:
         self._stop_playback.set()
         with self._mic_ready:
             self._mic_ready.notify_all()
+        if self._mic_source == "built_in":
+            self._built_in_stream.stop()
+            self._built_in_stream.close()
         try:
             self._mini.media.stop_recording()
             self._mini.media.stop_playing()

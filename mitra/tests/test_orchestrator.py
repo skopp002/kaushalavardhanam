@@ -159,3 +159,20 @@ def test_gestures_can_be_disabled(make_orchestrator, fake_robot):
     orch.handle_event(Event("playback_done"))
     orch.handle_event(Event("utterance", "hello"))
     assert fake_robot.poses == []
+
+
+def test_explain_in_english_allows_english_reply(make_orchestrator, fake_tts):
+    english = "I said that the sun shines in the sky and gives us light."
+    orch, agent = make_orchestrator(replies=[english])
+    orch.state = State.LISTENING
+    orch.handle_event(Event("utterance", "Can you explain that in English?"))
+    assert fake_tts.spoken == [english]              # Devanagari check waived
+    assert "[explain_in_english]" in agent.calls[0]  # model told it may switch
+
+
+def test_plain_english_question_still_requires_sanskrit(make_orchestrator, fake_tts):
+    orch, agent = make_orchestrator(replies=[EN_REPLY, EN_REPLY])
+    orch.state = State.LISTENING
+    orch.handle_event(Event("utterance", "Tell me about the sun."))
+    assert "[explain_in_english]" not in agent.calls[0]
+    assert fake_tts.spoken == [prompts.SAFE_FALLBACK]  # English reply rejected

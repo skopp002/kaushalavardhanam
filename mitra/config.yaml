@@ -5,6 +5,13 @@ robot:
   mic_chunk_s: 0.08        # seconds of audio per microphone read
   gestures: true           # state poses: antennas perk when listening, head
                            # tilts while thinking, droops when asleep (FR-5.3)
+  mic_source: built_in     # robot (default) | built_in — workaround for a macOS
+                           # 26 (Tahoe) Core Audio regression that returns
+                           # all-zero samples for the robot's own multichannel
+                           # USB mic (pollen-robotics/reachy_mini#820). Camera,
+                           # speaker, and motion are unaffected either way.
+                           # Set back to "robot" once Apple/Pollen fix this.
+  built_in_mic_device: "MacBook Pro Microphone"  # only used when mic_source: built_in
 
 models:
   llm:
@@ -32,7 +39,7 @@ models:
     # engine once the custom "mitra" onnx model is trained (Phase 1, FR-1.4).
     engine: "asr"
     phrase: "mitra"
-    asr_model: "mlx-community/whisper-tiny"
+    asr_model: "mlx-community/whisper-small-mlx"  # tiny mis-hears "mitra"; small is accurate (see src/audio/wake.py)
     model: "models/mitra.onnx"   # used by engine: openwakeword
     threshold: 0.6
   vad:

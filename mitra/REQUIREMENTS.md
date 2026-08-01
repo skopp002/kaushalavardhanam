@@ -1,10 +1,12 @@
 # Mitra — Sanskrit-Speaking Interactive Robot on Reachy Mini
 
-**Status:** Requirements | **Version:** 1.3 (2026-07-08) | **Predecessor:** earlier `mitra/` design study (Cohort 3, in git history at `40639db`)
+**Status:** Requirements | **Version:** 1.4 (2026-07-15) | **Predecessor:** earlier `mitra/` design study (Cohort 3, in git history at `40639db`)
 
 Mitra (मित्रम्, "friend") is an interactive desktop robot built on the **Reachy Mini Lite**. It wakes when someone says **"mitra"**, recognizes objects shown to its camera and names them in Sanskrit, and holds simple conversations — understanding English, Kannada, or Sanskrit, but always replying in Sanskrit.
 
 **v1.1 change:** inference is **local-first with open-source models** on the host Mac. Cloud APIs are an optional, config-gated fallback that is disabled by default — the robot must be fully functional with no internet access after models are downloaded.
+
+**v1.4 change:** FR-3.2 amended — output is Sanskrit by default, but an explicit "explain in English" request is answered in spoken English, explaining the recent Sanskrit exchange (learner support). The Devanagari validator is waived only for such explicitly tagged turns.
 
 **v1.3 change:** renamed Mitram → **Mitra** — मित्र is the vocative (सम्बोधन विभक्ति) of मित्रम्, the correct form of address, and is now the project name and wake word ("hey mitra"). Wake is ASR-transcript matching until the custom openWakeWord model is trained. LLM tag corrected to `qwen3-vl:8b-instruct` (bare `:8b` is the thinking variant).
 
@@ -78,7 +80,7 @@ Mitra (मित्रम्, "friend") is an interactive desktop robot built on
 
 ### FR-3 Sanskrit Conversation (Bilingual Bridge)
 - FR-3.1 Input languages: English, Kannada, Sanskrit (auto-detected per utterance; concept reused from the earlier `language_detector`).
-- FR-3.2 Output language: **Sanskrit only**, regardless of input language. Register: simple, short sentences (laukika Sanskrit), suitable for learners; avoid heavy sandhi and rare vocabulary.
+- FR-3.2 Output language: **Sanskrit by default**, regardless of input language. Exception: an explicit request to explain in English (e.g. "explain that in English") is answered in simple spoken English covering the recent exchange, then replies return to Sanskrit. Register: simple, short sentences (laukika Sanskrit), suitable for learners; avoid heavy sandhi and rare vocabulary.
 - FR-3.3 Conversation state (multi-turn context) is kept for the duration of a wake session.
 - FR-3.4 The system prompt constrains the local LLM to: reply in Sanskrit; keep replies ≤ 2 short sentences; use a **few-shot block of verified Sanskrit exchanges** (local models need stronger steering than frontier models); never switch to English speech (English may appear only in logs).
 - FR-3.5 A post-generation **validation pass** checks output is Devanagari-dominant and within length limits; on failure, one retry with a corrective prompt, then a fixed safe fallback phrase. (Cheap guard against a small model drifting into English or rambling.)
@@ -207,4 +209,5 @@ Levers if over budget: sentence-streamed TTS (start speaking on first sentence),
 - Sanskrit ASR research: [ASR for Sanskrit with Transfer Learning (2025)](https://arxiv.org/pdf/2501.10024) · [Vedavani benchmark](https://arxiv.org/pdf/2506.00145) · [AI4Bharat models](https://models.ai4bharat.org/)
 - Local runtime: [Ollama](https://ollama.com/) · [qwen3-vl:8b on Ollama](https://ollama.com/library/qwen3-vl:8b) (tagged `tools` + `vision`) · [mlx-whisper](https://github.com/ml-explore/mlx-examples)
 - Strands Agents: [strandsagents.com](https://strandsagents.com/) — core SDK with Ollama provider; robots lab ([docs](https://strandsagents.com/docs/labs/robots/)) targets SO-10x arms via LeRobot, not used
+- Cloud-inference Reachy Mini reference (Option B, DESIGN §1.5): [cagataycali/tiny-the-reachy](https://github.com/cagataycali/tiny-the-reachy) — Strands agent on Reachy Mini with cloud STT/LLM (OpenAI Realtime, Nova Sonic, Gemini) by default; source for the motion safety-envelope pattern and MCP dev-tooling idea, not for its multi-persona/cloud-STT design
 - Predecessor design: earlier `mitra/README.md` — view with `git show 40639db:mitra/README.md`

@@ -12,7 +12,7 @@ from .prompts import SANSKRIT_SYSTEM_PROMPT
 
 class MitraAgent:
     def __init__(self, llm_config: dict, tools: list,
-                 system_prompt: str = SANSKRIT_SYSTEM_PROMPT):
+                 system_prompt: str = SANSKRIT_SYSTEM_PROMPT, verbose: bool = True):
         try:
             from strands import Agent
         except ImportError as e:
@@ -20,10 +20,15 @@ class MitraAgent:
                 "strands-agents is required for the agent layer. "
                 "Install with: pip install 'mitra[agent]'"
             ) from e
+        # Strands' default callback handler streams reply tokens straight to
+        # stdout — set verbose=False (e.g. in batch/test scripts) to silence
+        # it and get only the final string from converse().
+        agent_kwargs = {} if verbose else {"callback_handler": None}
         self._agent = Agent(
             model=self._make_model(llm_config),
             tools=tools,
             system_prompt=system_prompt,
+            **agent_kwargs,
         )
 
     @staticmethod

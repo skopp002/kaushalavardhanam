@@ -31,6 +31,13 @@ from mitra.agent.tools import END_SESSION_SENTINEL
 from mitra.audio import TARGET_SAMPLERATE, resample
 
 
+# "explain in English" detection (FR-3.2 exception): explicit request only —
+# ordinary English questions still get Sanskrit answers.
+_EXPLAIN_IN_ENGLISH_RE = re.compile(
+    r"in\s+english|english\s*,?\s*please|(explain|meaning|translate|repeat)"
+    r"[\w\s,]{0,30}english", re.IGNORECASE)
+
+
 class State(str, Enum):
     ASLEEP = "ASLEEP"
     WAKING = "WAKING"
@@ -169,13 +176,16 @@ class Orchestrator:
             return
 
         lang = language_detector.detect(transcript, hint)
-        message = f"[lang={lang}] {transcript}"
+        explain_en = bool(_EXPLAIN_IN_ENGLISH_RE.search(transcript))
+        message = (f"[lang={lang}] [explain_in_english] {transcript}"
+                   if explain_en else f"[lang={lang}] {transcript}")
         if tl:
             tl.set("lang", lang)
             tl.set("transcript", transcript)
+            tl.set("explain_in_english", explain_en)
 
         try:
-            reply, session_end = self._generate_reply(message)
+            reply, session_end = self._generate_reply(message, explain_en)
         except Exception:
             self.logger.exception("agent failure (FR-6.4)")
             reply, session_end = prompts.APOLOGY_RETRY, False
@@ -209,9 +219,14 @@ class Orchestrator:
 
     # ------------------------------------------------------------ thinking
 
-    def _generate_reply(self, message: str) -> tuple[str, bool]:
+    def _generate_reply(self, message: str,
+                        explain_en: bool = False) -> tuple[str, bool]:
         """Agent call + lexicon substitution + validation with one retry
-        (FR-3.5), then the config-gated cloud fallback (FR-6.3)."""
+        (FR-3.5), then the config-gated cloud fallback (FR-6.3).
+
+        When the user explicitly asked for an English explanation (FR-3.2
+        exception), the Devanagari check is waived for this one turn — the
+        reply must merely be non-empty and not a ramble."""
         tl = self.turn_logger
 
         def generate(msg: str) -> str:
@@ -223,6 +238,12 @@ class Orchestrator:
         raw = generate(message)
         if END_SESSION_SENTINEL in raw:
             return raw, True
+
+        if explain_en:
+            reply = raw.strip()
+            if reply and len(reply) <= 3 * self.max_reply_chars:
+                return reply, False
+            return prompts.SAFE_FALLBACK, False
 
         reply = self._apply_lexicon(raw)
         ok, reason = validator.validate(reply, self.max_reply_chars)

@@ -118,6 +118,12 @@ model = AnthropicModel(model_id="claude-sonnet-5")          # or BedrockModel(..
 
 Everything else — the `Agent`, the four tools, prompts, validator, lexicon, orchestrator — is unchanged. The privacy boundary also holds in Option B: wake word, VAD, ASR, and TTS remain on the host, so only session *text* and explicitly captured frames cross the network; raw microphone audio never does. The local Ollama model is kept installed as an offline fallback (dashed path in the diagram): on network failure the orchestrator swaps the provider back and continues degraded rather than dying.
 
+**Reference for building out Option B:** [cagataycali/tiny-the-reachy](https://github.com/cagataycali/tiny-the-reachy) is a Strands-Agents-on-Reachy-Mini project built cloud-first by default (OpenAI Realtime, Amazon Nova Sonic, or Gemini for STT/LLM), the inverse of Mitra's local-first Option A. Relevant when Option B is actually implemented:
+- Its `tools/reachy_*` layer shows a fuller motion/expression vocabulary (14 tools vs. Mitra's 4) with a **safety envelope** (head pitch/roll ±40°, yaw ±180°, body yaw ±160°) clamped in every motion tool — Mitra's `POSES` table (`src/robot/reachy.py`) currently has no such clamp and should adopt one before more gesture tuning.
+- It binds expression calls to speech *as it plays* (e.g. antenna wobble during TTS) rather than a single pose per state — a model for evolving Mitra's SPEAKING gesture beyond the current static pose.
+- Its `mcp_server_entry.py` exposes robot tools over MCP for direct control from Claude Code/Desktop — useful as a **dev-only** tool for hardware debugging (this session's throwaway probe scripts are exactly what that would replace), not part of Mitra's runtime.
+- Not adopted, and deliberately so: its multi-persona identity (Telegram bot, autonomous heartbeat, shared SQLite brain) and default cloud STT — Mitra stays single-purpose and keeps ASR/TTS local even under Option B (per the privacy boundary above).
+
 ## 2. Module Decomposition
 
 ```

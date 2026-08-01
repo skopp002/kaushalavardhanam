@@ -4,9 +4,12 @@
 Two engines behind one ``process(chunk) -> bool`` interface:
 
 - ``TranscriptWakeDetector`` (default): an energy gate buffers short speech
-  windows and a small Whisper transcribes them; wake fires when the phrase
-  appears. No training needed — "hey mitra" works out of the box, at the cost
-  of ~1 s extra latency and more idle CPU than a real wake-word model.
+  windows and Whisper transcribes them; wake fires when the phrase appears.
+  No training needed. Uses whisper-**small** rather than tiny/base — testing
+  against real recordings showed tiny mis-hears "mitra" and base can
+  hallucinate repeated words on short clips (a known Whisper failure mode);
+  small was the smallest size that reliably caught it. Costs a bit more
+  latency/CPU than a trained wake-word model, in exchange for zero training.
 - ``WakeWordDetector``: openWakeWord, the production target once the custom
   "mitra" onnx model is trained (Phase 1: synthetic speaker/accent/noise
   variants, FR-1.4 accuracy targets).
@@ -66,7 +69,7 @@ class TranscriptWakeDetector:
     """
 
     def __init__(self, phrase: str = "mitra",
-                 asr_model: str = "mlx-community/whisper-tiny",
+                 asr_model: str = "mlx-community/whisper-small-mlx",
                  energy_threshold: float | None = None,  # None = adaptive gate
                  min_speech_s: float = 0.3,
                  hangover_s: float = 0.5, max_window_s: float = 3.0,

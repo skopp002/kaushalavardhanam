@@ -9,3 +9,4 @@ logs/
 data/
 models/*.onnx
 sim_frame.jpg
+clips/

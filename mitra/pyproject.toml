@@ -16,7 +16,8 @@ dependencies = [
 [project.optional-dependencies]
 # Each hardware/model layer is optional so the pipeline can be developed and
 # tested piecemeal (fakes stand in for anything not installed).
-robot = ["reachy-mini"]                      # add [mujoco] extra manually for simulation
+robot = ["reachy-mini", "sounddevice"]        # add [mujoco] extra manually for simulation;
+                                               # sounddevice backs mic_source: built_in
 agent = ["strands-agents[ollama]>=1.0"]
 wake = ["openwakeword>=0.6", "onnxruntime>=1.16"]
 vad = ["silero-vad>=5.0", "torch>=2.3"]

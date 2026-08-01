@@ -117,7 +117,7 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
         logger.exception("TTS warmup failed — continuing; speech will retry")
     wake = make_wake_detector(**models["wake"])
     if hasattr(wake, "warmup"):
-        logger.info("warming up wake ASR (first run downloads whisper-tiny)...")
+        logger.info("warming up wake ASR (first run downloads whisper-small)...")
         wake.warmup()
     vad_cfg = models["vad"]
     segmenter = make_segmenter(
@@ -155,8 +155,18 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     else:
         from mitra.robot.reachy import ReachyRobot
 
+        mic_source = config["robot"].get("mic_source", "robot")
+        if mic_source == "built_in":
+            logger.warning("mic_source=built_in: listening through the Mac's "
+                           "own mic (workaround for reachy_mini#820), not the "
+                           "robot's — camera/speaker/motion still go through it")
         logger.info("connecting to the robot daemon...")
-        robot = ReachyRobot(mic_chunk_s=config["robot"].get("mic_chunk_s", 0.08))
+        robot = ReachyRobot(
+            mic_chunk_s=config["robot"].get("mic_chunk_s", 0.08),
+            mic_source=mic_source,
+            built_in_mic_device=config["robot"].get(
+                "built_in_mic_device", "MacBook Pro Microphone"),
+        )
 
     agent = MitraAgent(models["llm"], build_tools(robot, tts))
 
