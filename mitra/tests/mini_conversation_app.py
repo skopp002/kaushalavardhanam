@@ -66,6 +66,9 @@ except ImportError:
 
 WAKE_PHRASE = "mitra"
 SILENCE_TIMEOUT_S = 30
+VOICE = "Junior"  # macOS's built-in child-like voice — better match for the
+                  # playful emotion library than the default adult voice.
+                  # `say -v '?'` lists every installed voice if you want another.
 SYSTEM_PROMPT = (
     "You are a friendly, helpful voice assistant running on a small desktop "
     "robot with a camera. Keep replies short — one or two spoken sentences — "
@@ -102,7 +105,8 @@ def main() -> None:
             path = f.name
         try:
             subprocess.run(
-                ["say", "-o", path, "--data-format=LEI16@22050", speech_text],
+                ["say", "-v", VOICE, "-o", path, "--data-format=LEI16@22050",
+                 speech_text],
                 check=True)
             wav, sr = sf.read(path, dtype="float32", always_2d=False)
             robot.speaker_play(wav, sr, block=True)

@@ -33,6 +33,9 @@ models:
     model: "ai4bharat/indic-parler-tts"
     fallback: "facebook/mms-tts-hin"   # ungated VITS; auto-used when parler is inaccessible
     device: "mps"
+    # Parler-TTS is steered by describing the voice in words, not by picking
+    # a named voice — edit this description to change how Mitra sounds.
+    voice_description: "A cheerful young child speaker with a bright, high-pitched voice delivers slow, warm, clear speech in a close-sounding recording with no background noise."
   wake:
     # asr: a small Whisper transcribes short speech windows and matches the
     # phrase — "hey mitra" works with no training. openwakeword: the target

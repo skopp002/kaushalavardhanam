@@ -105,8 +105,12 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     from mitra.speech.tts import SanskritTTS
 
     models = config["models"]
+    tts_kwargs = {}
+    if models["tts"].get("voice_description"):
+        tts_kwargs["voice_description"] = models["tts"]["voice_description"]
     tts = SanskritTTS(model=models["tts"]["model"], device=models["tts"]["device"],
-                      fallback_model=models["tts"].get("fallback", "facebook/mms-tts-hin"))
+                      fallback_model=models["tts"].get("fallback", "facebook/mms-tts-hin"),
+                      **tts_kwargs)
     # Warm up TTS at startup for the same reason as ASR below: the Parler
     # voice is a ~3.8 GB one-time download and a slow first load — without
     # this, the robot goes silent exactly when it should first greet.

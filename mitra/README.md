@@ -256,7 +256,9 @@ Remember `source .venv/bin/activate` in every terminal. When all three are up: s
 
 ### Just want to talk to it in English? (`tests/mini_conversation_app.py`)
 
-Mitra's full pipeline always replies in Sanskrit — that's the point of the project, not a bug. If you'd rather have a plain English conversation with the robot with no Devanagari involved, there's a separate, minimal standalone script for exactly that. It's additive: it doesn't touch or replace anything in Mitra's own pipeline (no lexicon, no Devanagari validator, no state gestures, no vision, no tool-calling) — it just reuses the same wake word, mic capture, VAD, ASR, and LLM connection as plain library calls, with a generic English system prompt and macOS's built-in `say` command for speech output (through the Mac's speakers, zero extra downloads).
+Mitra's full pipeline always replies in Sanskrit — that's the point of the project, not a bug. If you'd rather have a plain English conversation with the robot with no Devanagari involved, there's a separate, minimal standalone script for exactly that. It's additive: it doesn't touch or replace anything in Mitra's own pipeline (no lexicon, no Devanagari validator), but it's a real little robot app rather than a bare mic test — it reuses Mitra's wake word, mic capture, VAD, ASR, and LLM connection as plain library calls, keeps the same body language (nod on wake, listening/thinking/speaking poses, back to sleep after 30 s of silence), and gives the LLM the `capture_image` tool so you can hold something up and ask what it is. Speech output is macOS's built-in `say` engine — the child-like **Junior** voice, no TTS model download — synthesized on the Mac and played through the *robot's* speaker, the same output path Mitra uses.
+
+Setup: nothing beyond the main setup above — same virtualenv (if `python main.py --check` passes you're set), same Ollama model (`qwen3-vl:8b-instruct`) on `localhost:11434`, same daemon:
 
 ```bash
 # terminal 1 (if not already running)
@@ -267,7 +269,7 @@ source .venv/bin/activate
 python tests/mini_conversation_app.py
 ```
 
-Say **"hey mitra"**, then just talk — plain English in, plain English out. Useful as a quick sanity check of the wake/mic/LLM chain on its own, or as a starting template if you want to build something that isn't Sanskrit-focused on top of the same plumbing.
+Say **"hey mitra"**, then just talk — plain English in, plain English out; show it an object and ask "what am I holding?" to exercise the camera. Useful as a quick sanity check of the wake/mic/LLM chain on its own, or as a starting template if you want to build something that isn't Sanskrit-focused on top of the same plumbing — the knobs are constants at the top of the file: `WAKE_PHRASE`, `VOICE` (`say -v '?'` lists every installed voice), `SYSTEM_PROMPT`, and the Ollama model id.
 
 > **Note:** listens through the Mac's own built-in microphone rather than the robot's, since the robot's onboard mic currently returns silence on macOS 26 (Tahoe) due to a Core Audio regression affecting multichannel USB audio devices ([pollen-robotics/reachy_mini#820](https://github.com/pollen-robotics/reachy_mini/issues/820) — not specific to this project). Camera, speaker, and head motion are unaffected and still go through the robot normally. Set `robot.mic_source: robot` back in `config.yaml` once that's fixed upstream.
 
