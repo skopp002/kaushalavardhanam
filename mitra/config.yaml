@@ -1,40 +1,61 @@
 # Mitra runtime configuration (DESIGN.md §7)
+#
+# Platform note: tuned here for the Linux host (x86_64 + RTX 3070 mobile,
+# 8 GB VRAM). macOS/M1 Max values are kept inline as comments so one file
+# serves both. The mlx and parler paths are Apple-Silicon-only.
 
 robot:
-  backend: reachy          # reachy (real Lite over USB, or --sim daemon) | fake
-  mic_chunk_s: 0.08        # seconds of audio per microphone read
-  gestures: true           # state poses: antennas perk when listening, head
-                           # tilts while thinking, droops when asleep (FR-5.3)
-  mic_source: built_in     # robot (default) | built_in — workaround for a macOS
-                           # 26 (Tahoe) Core Audio regression that returns
-                           # all-zero samples for the robot's own multichannel
-                           # USB mic (pollen-robotics/reachy_mini#820). Camera,
-                           # speaker, and motion are unaffected either way.
-                           # Set back to "robot" once Apple/Pollen fix this.
-  built_in_mic_device: "MacBook Pro Microphone"  # only used when mic_source: built_in
+  backend: reachy # reachy (real Lite over USB, or --sim daemon) | fake
+  mic_chunk_s: 0.08 # seconds of audio per microphone read
+  gestures:
+    true # state poses: antennas perk when listening, head
+    # tilts while thinking, droops when asleep (FR-5.3)
+  mic_source:
+    built_in # robot (default) | built_in
+    # macOS: workaround for a macOS 26 (Tahoe) Core Audio
+    # regression returning all-zero samples from the
+    # robot's multichannel USB mic (reachy_mini#820).
+    # Linux: the daemon's media server needs the GStreamer
+    # webrtc plugin (webrtcsink), absent on Ubuntu 22.04 —
+    # run the daemon with --no-media and capture here.
+  built_in_mic_device:
+    "pulse" # linux: PulseAudio/PipeWire default source.
+    # mac: "MacBook Pro Microphone".
+    # List candidates: python -c "import sounddevice as sd;
+    # print(sd.query_devices())"
 
 models:
   llm:
-    provider: ollama       # ollama | anthropic | bedrock (Option B, DESIGN §1.5)
+    provider: ollama # ollama | anthropic | bedrock (Option B, DESIGN §1.5)
     host: "http://localhost:11434"
-    id: "qwen3-vl:8b-instruct"  # NOT the bare :8b tag — that is the "thinking"
-                                # variant: slow and returns empty content
-    keep_alive: "30m"      # keeps the model resident between turns (REQUIREMENTS §8)
+    id:
+      "qwen3-vl:8b-instruct" # NOT the bare :8b tag — that is the "thinking"
+      # variant: slow and returns empty content
+    keep_alive:
+      "30m" # keeps the model resident between turns (REQUIREMENTS §8).
+      # On 8 GB VRAM this leaves no room for ASR/TTS on the
+      # GPU, which is why both sit on cpu below.
     temperature: 0.3
   asr:
     # turbo: half the download of large-v3 and 4-6x faster decoding at
-    # near-equal en/kn accuracy — the first latency lever in REQUIREMENTS §8
-    default: "mlx-community/whisper-large-v3-turbo"
-    sanskrit: null         # HF repo of a Sanskrit Whisper fine-tune, once selected (Phase 3)
-    backend: "mlx"
-    device: "mps"
+    # near-equal en/kn accuracy — the first latency lever in REQUIREMENTS §8.
+    # Drop to openai/whisper-small (~500 MB) if disk or RAM is tight.
+    default: "openai/whisper-small" # mac: mlx-community/whisper-large-v3-turbo
+    sanskrit: null # HF repo of a Sanskrit Whisper fine-tune, once selected (Phase 3)
+    backend: "transformers" # transformers (linux) | mlx (mac, Apple Silicon only)
+    device: "cuda:0" # mac: mps. cuda:0 here would contend with Qwen for VRAM
   tts:
-    engine: "indic-parler-tts"
-    model: "ai4bharat/indic-parler-tts"
-    fallback: "facebook/mms-tts-hin"   # ungated VITS; auto-used when parler is inaccessible
-    device: "mps"
+    engine:
+      "vits" # vits (linux) | indic-parler-tts (mac)
+      # parler-tts pins transformers<=4.46.1, which collides
+      # with reachy-mini's huggingface-hub>=1.17 — the two
+      # are not co-installable (see src/speech/tts.py)
+    model: "facebook/mms-tts-hin" # ungated VITS; mac: ai4bharat/indic-parler-tts
+    fallback: "facebook/mms-tts-hin" # used when the primary model is inaccessible
+    device: "cpu" # mac: mps
     # Parler-TTS is steered by describing the voice in words, not by picking
     # a named voice — edit this description to change how Mitra sounds.
+    # Ignored by engine: vits, which has no voice steering.
     voice_description: "A cheerful young child speaker with a bright, high-pitched voice delivers slow, warm, clear speech in a close-sounding recording with no background noise."
   wake:
     # asr: a small Whisper transcribes short speech windows and matches the
@@ -42,19 +63,23 @@ models:
     # engine once the custom "mitra" onnx model is trained (Phase 1, FR-1.4).
     engine: "asr"
     phrase: "mitra"
-    asr_model: "mlx-community/whisper-small-mlx"  # tiny mis-hears "mitra"; small is accurate (see src/audio/wake.py)
-    model: "models/mitra.onnx"   # used by engine: openwakeword
+    asr_model:
+      "openai/whisper-small" # tiny mis-hears "mitra"; small is accurate
+      # (see src/audio/wake.py). mac: mlx-community/whisper-small-mlx
+    backend: "transformers" # transformers (linux) | mlx (mac)
+    device: "cpu" # runs on every gated speech window — keep it off the GPU
+    model: "models/mitra.onnx" # used by engine: openwakeword
     threshold: 0.6
   vad:
-    engine: "silero"       # silero | energy (dependency-free fallback)
+    engine: "silero" # silero | energy (dependency-free fallback)
     min_speech_s: 0.3
     min_silence_s: 0.8
     max_utterance_s: 15.0
 
 agent:
-  deterministic_vision: false   # true = orchestrator-mediated capture_image (DESIGN §1.4)
+  deterministic_vision: false # true = orchestrator-mediated capture_image (DESIGN §1.4)
 
-cloud_fallback:                 # FR-6.3 — no key/provider configured == feature absent
+cloud_fallback: # FR-6.3 — no key/provider configured == feature absent
   enabled: false
   provider: null
   model_id: null

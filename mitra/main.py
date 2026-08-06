@@ -51,7 +51,13 @@ def load_config(path: str | Path) -> dict:
 
 
 def check(config: dict) -> int:
-    """Report availability of every optional layer (Phase 0 helper)."""
+    """Report availability of every optional layer (Phase 0 helper).
+
+    Speech probes follow the configured backend rather than a fixed list: the
+    mlx/parler stack is Apple-Silicon-only, so on Linux those are *expected*
+    to be absent and reporting them as MISSING sends people chasing a
+    non-problem. Only the layer this config will actually load is checked.
+    """
     import importlib
     import json
     import urllib.request
@@ -65,23 +71,36 @@ def check(config: dict) -> int:
             print(f"  MISSING  {name}  ({e.name or e})")
             return False
 
+    models = config["models"]
+    asr_backend = models["asr"].get("backend", "mlx")
+    wake_backend = models["wake"].get("backend", "mlx")
+    tts_engine = models["tts"].get("engine", "indic-parler-tts")
+
     print("components:")
     probe("reachy-mini (robot/sim)", "reachy_mini")
     probe("strands-agents (agent)", "strands")
     probe("openwakeword (wake)", "openwakeword")
     probe("silero-vad (VAD)", "silero_vad")
-    probe("mlx-whisper (ASR)", "mlx_whisper")
-    probe("parler-tts (TTS)", "parler_tts")
 
-    host = config["models"]["llm"]["host"]
-    model_id = config["models"]["llm"]["id"]
+    if asr_backend == "mlx" or wake_backend == "mlx":
+        probe(f"mlx-whisper (ASR, backend={asr_backend})", "mlx_whisper")
+    else:
+        probe(f"transformers (ASR, backend={asr_backend})", "transformers")
+
+    if tts_engine == "indic-parler-tts":
+        probe(f"parler-tts (TTS, engine={tts_engine})", "parler_tts")
+    else:
+        probe(f"transformers (TTS, engine={tts_engine})", "transformers")
+
+    host = models["llm"]["host"]
+    model_id = models["llm"]["id"]
     print("ollama:")
     try:
         with urllib.request.urlopen(f"{host}/api/tags", timeout=3) as resp:
-            models = [m["name"] for m in json.load(resp).get("models", [])]
-        state = "ok" if any(m.startswith(model_id) for m in models) else "MISSING"
+            installed = [m["name"] for m in json.load(resp).get("models", [])]
+        state = "ok" if any(m.startswith(model_id) for m in installed) else "MISSING"
         print(f"  ok       server at {host}")
-        print(f"  {state:8} model {model_id}  (installed: {', '.join(models) or 'none'})")
+        print(f"  {state:8} model {model_id}  (installed: {', '.join(installed) or 'none'})")
     except OSError as e:
         print(f"  DOWN     {host}  ({e})")
 
@@ -109,12 +128,14 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     if models["tts"].get("voice_description"):
         tts_kwargs["voice_description"] = models["tts"]["voice_description"]
     tts = SanskritTTS(model=models["tts"]["model"], device=models["tts"]["device"],
+                      engine=models["tts"].get("engine", "indic-parler-tts"),
                       fallback_model=models["tts"].get("fallback", "facebook/mms-tts-hin"),
                       **tts_kwargs)
     # Warm up TTS at startup for the same reason as ASR below: the Parler
     # voice is a ~3.8 GB one-time download and a slow first load — without
-    # this, the robot goes silent exactly when it should first greet.
-    logger.info("warming up TTS (first run downloads the voice, ~3.8 GB one time)...")
+    # this, the robot goes silent exactly when it should first greet. The VITS
+    # path (engine: vits) is far smaller, but the warmup still hides its load.
+    logger.info("warming up TTS (first run downloads the voice)...")
     try:
         tts.synthesize("नमस्ते")
     except Exception:
@@ -161,9 +182,10 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
 
         mic_source = config["robot"].get("mic_source", "robot")
         if mic_source == "built_in":
-            logger.warning("mic_source=built_in: listening through the Mac's "
-                           "own mic (workaround for reachy_mini#820), not the "
-                           "robot's — camera/speaker/motion still go through it")
+            logger.warning("mic_source=built_in: listening through the host's "
+                           "own mic, not the robot's — camera/speaker/motion "
+                           "still go through it (macOS: reachy_mini#820; "
+                           "Linux: missing GStreamer webrtc plugin)")
         logger.info("connecting to the robot daemon...")
         robot = ReachyRobot(
             mic_chunk_s=config["robot"].get("mic_chunk_s", 0.08),
