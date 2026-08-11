@@ -104,10 +104,19 @@ def check(config: dict) -> int:
     except OSError as e:
         print(f"  DOWN     {host}  ({e})")
 
+    from mitra.lexicon.phrasebook import Phrasebook
     from mitra.lexicon.store import LexiconStore
 
     store = LexiconStore()  # in-memory, seeds from the bundled JSON
     print(f"lexicon: {store.count()} seed entries")
+
+    pb_path = config.get("phrasebook", {}).get("path", "data/phrasebook.jsonl")
+    phrasebook = Phrasebook(pb_path)
+    if phrasebook.count():
+        print(f"phrasebook: {phrasebook.count()} entries ({pb_path})")
+    else:
+        print(f"phrasebook: MISSING at {pb_path} — replies will be ungrounded.\n"
+              f"  build it: python3 scripts/build_phrasebook.py data/daily.pdf")
     return 0
 
 
@@ -119,6 +128,7 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     from mitra.audio.asr import Transcriber
     from mitra.audio.vad import make_segmenter
     from mitra.audio.wake import make_wake_detector
+    from mitra.lexicon.phrasebook import Phrasebook
     from mitra.lexicon.store import LexiconStore
     from mitra.orchestrator import Orchestrator
     from mitra.speech.tts import SanskritTTS
@@ -166,6 +176,15 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
         logger.exception("ASR warmup failed — continuing; the first turn will retry")
     lexicon = LexiconStore(config["lexicon"]["db_path"])
 
+    # Retrieval corpus for conversational grounding. Loaded before the robot
+    # connects so a missing or empty file is visible in the log ahead of the
+    # first turn rather than being silently absent from every reply.
+    phrasebook = Phrasebook(
+        config.get("phrasebook", {}).get("path", "data/phrasebook.jsonl"))
+    if not phrasebook.count():
+        logger.warning("phrasebook empty — replies will be ungrounded. Build it "
+                       "with: python3 scripts/build_phrasebook.py data/daily.pdf")
+
     # Connect to the robot ONLY after all model warmups: opening the daemon
     # connection starts the microphone pipeline, and the multi-GB model loads
     # above starve the audio threads badly enough that GStreamer floods the
@@ -194,19 +213,23 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
                 "built_in_mic_device", "MacBook Pro Microphone"),
         )
 
-    agent = MitraAgent(models["llm"], build_tools(robot, tts))
+    # verbose=False silences Strands' default callback handler, which streams
+    # reply tokens straight to stdout and interleaves them with the log lines
+    # ("क2026-08-08 23:07:56 INFO mitra: speak: ..."). The --debug log already
+    # carries every reply, so nothing is lost.
+    agent = MitraAgent(models["llm"], build_tools(robot, tts), verbose=False)
 
     fallback_factory = None
     cloud = config.get("cloud_fallback", {})
     if cloud.get("enabled") and cloud.get("provider"):  # FR-6.3
         fallback_factory = lambda: MitraAgent(  # noqa: E731
             {"provider": cloud["provider"], "id": cloud["model_id"]},
-            build_tools(robot, tts),
+            build_tools(robot, tts), verbose=False,
         )
 
     orchestrator = Orchestrator(
         robot=robot, agent=agent, tts=tts, lexicon=lexicon,
-        wake=wake, segmenter=segmenter, asr=asr,
+        wake=wake, segmenter=segmenter, asr=asr, phrasebook=phrasebook,
         turn_logger=TurnLogger(config["logging"]["dir"], logger),
         logger=logger,
         gestures=config["robot"].get("gestures", True),

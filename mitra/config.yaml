@@ -43,7 +43,7 @@ models:
     default: "openai/whisper-small" # mac: mlx-community/whisper-large-v3-turbo
     sanskrit: null # HF repo of a Sanskrit Whisper fine-tune, once selected (Phase 3)
     backend: "transformers" # transformers (linux) | mlx (mac, Apple Silicon only)
-    device: "cuda:0" # mac: mps. cuda:0 here would contend with Qwen for VRAM
+    device: "cpu" # mac: mps. cuda:0 here would contend with Qwen for VRAM
   tts:
     engine:
       "vits" # vits (linux) | indic-parler-tts (mac)

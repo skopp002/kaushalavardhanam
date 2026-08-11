@@ -72,6 +72,7 @@ class Transcriber:
             )
         out = self._hf_pipeline(
             {"array": np.asarray(audio, dtype=np.float32), "sampling_rate": 16000},
+            generate_kwargs={"language": "en", "task": "transcribe"},
             return_language=True,
         )
         text = out["text"].strip()

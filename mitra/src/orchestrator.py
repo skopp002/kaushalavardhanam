@@ -7,8 +7,9 @@ loop's thread. Two daemon helpers — the audio pump and the playback watcher �
 communicate with the core only by putting events on the queue (DESIGN §3).
 Tests drive ``handle_event`` directly with fakes; ``run()`` adds the threads.
 
-The agent may call tools itself, but two paths stay deterministic regardless
-of model quality (DESIGN §1.4): ``nod`` fires here on wake, and every reply
+The agent may call tools itself, but three paths stay deterministic regardless
+of model quality (DESIGN §1.4): ``nod`` fires here on wake, unintelligible
+transcripts are refused here before the model ever sees them, and every reply
 passes the validator and is spoken here.
 """
 
@@ -37,6 +38,30 @@ _EXPLAIN_IN_ENGLISH_RE = re.compile(
     r"in\s+english|english\s*,?\s*please|(explain|meaning|translate|repeat)"
     r"[\w\s,]{0,30}english", re.IGNORECASE)
 
+# Whisper emits these on silence or near-silence regardless of what was said —
+# they are training-data artifacts (YouTube captions), not transcriptions.
+# Reaching the model with one produces a confident answer to a question the
+# user never asked, which is worse than asking them to repeat.
+_ASR_HALLUCINATIONS = {
+    "thank you", "thank you.", "thanks for watching", "thank you very much",
+    "thank you for watching", "thank you for watching!", "you", "bye",
+    "please subscribe", "subtitles by the amara.org community",
+}
+
+# Below this many characters a transcript carries too little signal to answer.
+_MIN_TRANSCRIPT_CHARS = 3
+
+# Wrapper around retrieved phrasing. The wording is load-bearing: labelled only
+# as "reference phrasing", an 8B model pastes the nearest line back verbatim —
+# we watched it answer "Sarvam kushalam" with "सर्वं कुशलम्।", which is the
+# corpus row, not a reply. Naming what to do (write ONE new sentence) beats
+# naming what not to do.
+_REFERENCE_HEADER = (
+    "\n[These are examples of everyday Sanskrit register, not answers. "
+    "Do NOT copy them. Write ONE new sentence that actually answers the user, "
+    "in this same simple style]\n"
+)
+
 
 class State(str, Enum):
     ASLEEP = "ASLEEP"
@@ -54,7 +79,7 @@ class Event:
 
 class Orchestrator:
     def __init__(self, *, robot, agent, tts, lexicon,
-                 wake=None, segmenter=None, asr=None,
+                 wake=None, segmenter=None, asr=None, phrasebook=None,
                  turn_logger=None, logger: logging.Logger | None = None,
                  silence_timeout_s: float = 30.0,
                  max_reply_chars: int = validator.MAX_REPLY_CHARS,
@@ -66,6 +91,11 @@ class Orchestrator:
         self.wake = wake
         self.segmenter = segmenter
         self.asr = asr
+        # Optional: retrieval over the everyday-phrase corpus. Without it the
+        # model has only the few-shot examples to fall back on, and an 8B with
+        # weak Sanskrit priors answers an unclear turn by reciting one of them
+        # verbatim — which is what makes three exchanges read as one.
+        self.phrasebook = phrasebook
         self.turn_logger = turn_logger
         self.logger = logger or logging.getLogger("mitra")
         self.gestures = gestures
@@ -79,6 +109,7 @@ class Orchestrator:
         self._stop = threading.Event()
         self._sleep_after_speaking = False
         self._last_activity = time.monotonic()
+        self._consecutive_retries = 0
 
     # ------------------------------------------------------------------ run
 
@@ -145,6 +176,7 @@ class Orchestrator:
         self.logger.info("wake word detected")
         self.robot.nod()                      # deterministic (DESIGN §1.4)
         self._emotion("welcoming1")
+        self._consecutive_retries = 0
         self._speak(prompts.GREETING)         # → playback_done → LISTENING
 
     def _to_listening(self) -> None:
@@ -165,12 +197,69 @@ class Orchestrator:
         self._pose("asleep")                  # head droops: session over
         self._emotion("mini-deep-sleep")
         self._sleep_after_speaking = False
+        self._consecutive_retries = 0
         self.agent.reset()                    # context is per-session (FR-3.3)
         if self.wake:
             self.wake.reset()
         if self.segmenter:
             self.segmenter.reset()
         self.logger.info("asleep")
+
+    # ------------------------------------------------------ turn processing
+
+    def _is_unintelligible(self, transcript: str, lang: str) -> str | None:
+        """Return a reason string if this transcript must not reach the model.
+
+        Whisper always returns *something*: on silence it emits a stock caption
+        phrase, and on speech in a language it wasn't expecting it transliterates
+        into whatever script it guessed (we have seen Korean, Japanese, Arabic
+        and Tamil renderings of spoken Sanskrit). Both look like valid input to
+        the agent, which then answers confidently — or, worse, echoes the noise
+        back as if it were Sanskrit. Refusing here is the only place the
+        pipeline can tell the difference.
+        """
+        cleaned = transcript.strip()
+        if len(cleaned) < _MIN_TRANSCRIPT_CHARS:
+            return "too short"
+        if cleaned.lower().strip(" .!?") in _ASR_HALLUCINATIONS:
+            return "known ASR hallucination"
+        if lang == "unknown":
+            # Script matched none of en/kn/sa: the words may well be right but
+            # they are in an alphabet the model has no reason to connect to
+            # this conversation.
+            return "unrecognized script"
+        return None
+
+    def _retrieve_examples(self, transcript: str) -> list:
+        """Nearest everyday phrases for this turn, or [] if unavailable."""
+        if self.phrasebook is None:
+            return []
+        try:
+            return self.phrasebook.similar(transcript, k=3)
+        except Exception:
+            self.logger.exception("phrasebook lookup failed; continuing ungrounded")
+            return []
+
+    def _build_message(self, transcript: str, lang: str, explain_en: bool) -> str:
+        """Assemble the turn message: tags, transcript, retrieved phrasing.
+
+        The examples go after the transcript so the user's turn stays the most
+        recent thing in the message — context that follows a question tends to
+        get answered instead of the question.
+        """
+        header = f"[lang={lang}]"
+        if explain_en:
+            header += " [explain_in_english]"
+        message = f"{header} {transcript}"
+
+        examples = self._retrieve_examples(transcript)
+        if examples:
+            lines = "\n".join(
+                f"  {row.get('english', '')} → {row.get('sanskrit', '')}"
+                for row in examples
+            )
+            message += _REFERENCE_HEADER + lines
+        return message
 
     def _on_utterance(self, payload) -> None:
         self.state = State.THINKING
@@ -181,17 +270,29 @@ class Orchestrator:
             tl.start_turn()
 
         transcript, hint = self._transcribe(payload)
-        if not transcript.strip():
-            self._finish_turn(prompts.APOLOGY_RETRY)
-            return
+        lang = language_detector.detect(transcript, hint) if transcript.strip() else "unknown"
 
-        lang = language_detector.detect(transcript, hint)
-        explain_en = bool(_EXPLAIN_IN_ENGLISH_RE.search(transcript))
-        message = (f"[lang={lang}] [explain_in_english] {transcript}"
-                   if explain_en else f"[lang={lang}] {transcript}")
         if tl:
             tl.set("lang", lang)
             tl.set("transcript", transcript)
+
+        reason = self._is_unintelligible(transcript, lang)
+        if reason:
+            # Do NOT call the model. "Sorry, say that again" is a coherent
+            # conversational move; answering noise is not.
+            self._consecutive_retries += 1
+            self.logger.info("transcript rejected (%s): %r", reason, transcript)
+            if tl:
+                tl.set("rejected", reason)
+                tl.set("explain_in_english", False)
+            self._emotion("confused1")
+            self._finish_turn(prompts.APOLOGY_RETRY)
+            return
+
+        self._consecutive_retries = 0
+        explain_en = bool(_EXPLAIN_IN_ENGLISH_RE.search(transcript))
+        message = self._build_message(transcript, lang, explain_en)
+        if tl:
             tl.set("explain_in_english", explain_en)
 
         try:

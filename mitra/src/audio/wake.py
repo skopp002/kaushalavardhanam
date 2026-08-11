@@ -119,7 +119,8 @@ class TranscriptWakeDetector:
         if peak > 0:  # normalize: Whisper mis-hears quiet capture badly
             audio = (audio / peak * 0.9).astype(np.float32)
         out = self._pipeline(
-            {"array": np.asarray(audio, dtype=np.float32), "sampling_rate": 16000}
+            {"array": np.asarray(audio, dtype=np.float32), "sampling_rate": 16000},
+            generate_kwargs={"language": "en", "task": "transcribe"},
         )
         return out.get("text", "")
 
