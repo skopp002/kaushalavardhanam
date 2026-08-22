@@ -28,15 +28,21 @@ except ImportError:
     spec.loader.exec_module(module)
 
 from mitra.audio.wake import TranscriptWakeDetector  # noqa: E402
-from mitra.robot.reachy import ReachyRobot  # noqa: E402
+from mitra.robot.reachy import DesktopRobot, ReachyRobot  # noqa: E402
 
 
 def main() -> None:
-    robot = ReachyRobot()
+    try:
+        if "--desktop" in sys.argv:
+            raise RuntimeError("desktop flag specified")
+        robot = ReachyRobot()
+    except Exception:
+        print("reachy daemon not running — using direct Mac microphone (Desktop mode, 0% sim CPU)")
+        robot = DesktopRobot()
     detector = TranscriptWakeDetector()
     print("warming up wake ASR...")
     detector.warmup()
-    print("listening — say 'hey mitra' (Ctrl-C to stop)")
+    print("listening — say 'hey mitra' or 'mitra' (Ctrl-C to stop)")
     print("meter: each # is mic level; SPEECH marks where the gate opens\n")
     try:
         while True:

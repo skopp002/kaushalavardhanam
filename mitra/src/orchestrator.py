@@ -185,7 +185,9 @@ class Orchestrator:
             self._finish_turn(prompts.APOLOGY_RETRY)
             return
 
-        lang = language_detector.detect(transcript, hint)
+        # For microphone turns, the audio-first LID result is authoritative.
+        # Text-console mode has no hint and retains script detection.
+        lang = hint or language_detector.detect(transcript, hint)
         explain_en = bool(_EXPLAIN_IN_ENGLISH_RE.search(transcript))
         message = (f"[lang={lang}] [explain_in_english] {transcript}"
                    if explain_en else f"[lang={lang}] {transcript}")

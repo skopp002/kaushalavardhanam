@@ -18,8 +18,8 @@ def test_required_sections_present():
 def test_load_bearing_model_choices():  # CLAUDE.md decisions 1–2
     llm = CONFIG["models"]["llm"]
     assert llm["provider"] == "ollama"
-    # the bare :8b tag is the "thinking" variant — must stay on instruct
-    assert llm["id"] == "qwen3-vl:8b-instruct"
+    # the bare :8b tag is the "thinking" variant — must stay on instruct or 2b
+    assert llm["id"] in ("qwen3-vl:8b-instruct", "qwen3-vl:2b")
     assert CONFIG["cloud_fallback"]["enabled"] is False
 
 

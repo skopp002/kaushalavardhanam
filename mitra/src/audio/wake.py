@@ -71,11 +71,16 @@ class TranscriptWakeDetector:
     def __init__(self, phrase: str = "mitra",
                  asr_model: str = "mlx-community/whisper-small-mlx",
                  energy_threshold: float | None = None,  # None = adaptive gate
-                 min_speech_s: float = 0.3,
-                 hangover_s: float = 0.5, max_window_s: float = 3.0,
+                 min_speech_s: float = 0.25,
+                 hangover_s: float = 0.4, max_window_s: float = 3.0,
                  transcribe_fn=None):
         base = phrase.strip().lower()
-        self._variants = {base, base.replace("t", "th"), "मित्र"}
+        self._variants = {
+            base,
+            base.replace("t", "th"),
+            "meetra", "meethra", "mitram", "mithram",
+            "मित्रा", "मित्र", "मित्रम्", "नमस्ते",
+        }
         self._asr_model = asr_model
         self._transcribe = transcribe_fn or self._mlx_transcribe
         self._segmenter = EnergySegmenter(
@@ -87,11 +92,19 @@ class TranscriptWakeDetector:
         import mlx_whisper
 
         peak = float(np.abs(audio).max())
-        if peak > 0:  # normalize: Whisper mis-hears quiet capture badly
-            audio = (audio / peak * 0.9).astype(np.float32)
-        return mlx_whisper.transcribe(
-            audio, path_or_hf_repo=self._asr_model
-        ).get("text", "")
+        if peak < 0.008:
+            return ""
+        audio = (audio / peak * 0.9).astype(np.float32)
+        try:
+            return mlx_whisper.transcribe(
+                audio,
+                path_or_hf_repo=self._asr_model,
+                condition_on_previous_text=False,
+                initial_prompt="Hey Mitra, Mitra, मित्र.",
+            ).get("text", "")
+        except Exception:
+            logger.exception("Wake transcription failed")
+            return ""
 
     def process(self, chunk_16k_mono: np.ndarray) -> bool:
         utterance = self._segmenter.process(chunk_16k_mono)
@@ -102,15 +115,18 @@ class TranscriptWakeDetector:
         woke = any(v in cleaned for v in self._variants)
         # Visible feedback in --debug: without this, a failed wake check is
         # indistinguishable from "heard nothing at all".
-        logger.debug("wake check (%.1fs audio) heard %r -> %s",
-                     len(utterance) / 16000, text.strip(),
-                     "WAKE" if woke else "no match")
+        logger.info("heard wake candidate (%.1fs audio): %r -> %s",
+                    len(utterance) / 16000, text.strip(),
+                    "WAKE DETECTED" if woke else "no match")
         return woke
 
     def warmup(self) -> None:
         """Trigger the one-time whisper download/load before the run loop, so
         the first real wake attempt isn't stalled behind it."""
-        self._transcribe(np.zeros(8000, dtype=np.float32))
+        try:
+            self._transcribe(np.zeros(8000, dtype=np.float32))
+        except Exception:
+            logger.exception("Wake ASR warmup failed")
 
     def reset(self) -> None:
         self._segmenter.reset()
@@ -120,7 +136,8 @@ def make_wake_detector(engine: str = "asr", **cfg):
     if engine == "asr":
         return TranscriptWakeDetector(
             phrase=cfg.get("phrase", "mitra"),
-            asr_model=cfg.get("asr_model", "mlx-community/whisper-tiny"),
+            asr_model=cfg.get("asr_model", "mlx-community/whisper-small-mlx"),
+            energy_threshold=cfg.get("energy_threshold"),
         )
     if engine == "openwakeword":
         return WakeWordDetector(model=cfg.get("model", "models/mitra.onnx"),

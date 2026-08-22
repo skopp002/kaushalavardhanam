@@ -121,7 +121,9 @@ def main() -> None:
     wake = TranscriptWakeDetector(phrase=WAKE_PHRASE)
     wake.warmup()
     segmenter = make_segmenter("silero", min_silence_s=0.8, max_utterance_s=15.0)
-    asr = Transcriber(default_model="mlx-community/whisper-large-v3-turbo")
+    asr = Transcriber(
+        english_fallback_model="mlx-community/whisper-large-v3-turbo"
+    )
 
     # Only capture_image from Mitra's four tools (src/agent/tools.py) — the
     # other three (speak_sanskrit, nod, end_session) are either Sanskrit-

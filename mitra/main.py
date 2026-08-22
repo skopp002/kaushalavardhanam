@@ -17,7 +17,7 @@ from pathlib import Path
 # fork warning, and transformers' full-config dumps during Parler-TTS load.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
-os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")  # no "Fetching 4 files" spam
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")  # no "Fetching 4 files" spam
 
 _ROOT = Path(__file__).resolve().parent
 
@@ -69,9 +69,8 @@ def check(config: dict) -> int:
     probe("reachy-mini (robot/sim)", "reachy_mini")
     probe("strands-agents (agent)", "strands")
     probe("openwakeword (wake)", "openwakeword")
-    probe("silero-vad (VAD)", "silero_vad")
     probe("mlx-whisper (ASR)", "mlx_whisper")
-    probe("parler-tts (TTS)", "parler_tts")
+    probe("transformers (TTS)", "transformers")
 
     host = config["models"]["llm"]["host"]
     model_id = config["models"]["llm"]["id"]
@@ -108,13 +107,16 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     tts_kwargs = {}
     if models["tts"].get("voice_description"):
         tts_kwargs["voice_description"] = models["tts"]["voice_description"]
-    tts = SanskritTTS(model=models["tts"]["model"], device=models["tts"]["device"],
+    if "speaker_id" in models["tts"]:
+        tts_kwargs["speaker_id"] = models["tts"]["speaker_id"]
+    if "emotion_id" in models["tts"]:
+        tts_kwargs["emotion_id"] = models["tts"]["emotion_id"]
+    tts_engine = models["tts"].get("engine", "vits")
+    tts = SanskritTTS(model=models["tts"]["model"], device=models["tts"].get("device", "mps"),
+                      engine=tts_engine,
                       fallback_model=models["tts"].get("fallback", "facebook/mms-tts-hin"),
                       **tts_kwargs)
-    # Warm up TTS at startup for the same reason as ASR below: the Parler
-    # voice is a ~3.8 GB one-time download and a slow first load — without
-    # this, the robot goes silent exactly when it should first greet.
-    logger.info("warming up TTS (first run downloads the voice, ~3.8 GB one time)...")
+    logger.info("warming up TTS (%s engine)...", tts_engine)
     try:
         tts.synthesize("नमस्ते")
     except Exception:
@@ -126,36 +128,38 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     vad_cfg = models["vad"]
     segmenter = make_segmenter(
         vad_cfg.get("engine", "silero"),
-        min_silence_s=vad_cfg.get("min_silence_s", 0.8),
+        min_silence_s=vad_cfg.get("min_silence_s", 0.4),
         max_utterance_s=vad_cfg.get("max_utterance_s", 15.0),
     )
-    asr = Transcriber(default_model=models["asr"]["default"],
-                      sanskrit_model=models["asr"].get("sanskrit"),
-                      backend=models["asr"].get("backend", "mlx"),
-                      device=models["asr"].get("device", "mps"))
-    # Warm up ASR before the run loop: Whisper large-v3 (~3 GB) downloads on
-    # first use. Without this, the download would stall the FIRST conversation
-    # turn for minutes with no feedback; here it happens at startup with a log
-    # line, and later runs load from the local cache in seconds.
-    logger.info("warming up ASR (first run downloads Whisper, ~1.6 GB one time)...")
-    import numpy as np
+    asr_cfg = models["asr"]
+    asr = Transcriber(
+        model=asr_cfg.get("model", "mlx-community/whisper-large-v3-turbo"),
+    )
+    logger.info("warming up ASR (first run downloads whisper-large-v3-turbo)...")
     try:
-        asr.transcribe(np.zeros(8000, dtype=np.float32))  # 0.5 s of silence
+        asr.warmup()
     except Exception:
         logger.exception("ASR warmup failed — continuing; the first turn will retry")
+
+    logger.info("warming up LLM...")
+    try:
+        MitraAgent.warmup_model(models["llm"])
+    except Exception:
+        logger.exception("LLM warmup failed — continuing; the first turn will retry")
     lexicon = LexiconStore(config["lexicon"]["db_path"])
 
-    # Connect to the robot ONLY after all model warmups: opening the daemon
-    # connection starts the microphone pipeline, and the multi-GB model loads
-    # above starve the audio threads badly enough that GStreamer floods the
-    # console with "Can't record audio fast enough" and drops samples. With
-    # the mic opened last, warmups happen in silence and listening starts
-    # with everything already resident.
-    if robot_backend == "fake":
-        from mitra.robot.reachy import FakeReachy
+    # Connect only after all model warmups complete, so audio capture begins
+    # with every model resident.
+    if robot_backend in ("desktop", "fake"):
+        from mitra.robot.reachy import DesktopRobot, FakeReachy
 
-        robot = FakeReachy()
-        logger.warning("using FakeReachy — no camera/audio/motion")
+        if robot_backend == "fake":
+            robot = FakeReachy()
+            logger.warning("using FakeReachy — headless, no audio I/O")
+        else:
+            mic_device = config["robot"].get("built_in_mic_device", "MacBook Neo Microphone")
+            robot = DesktopRobot(device_name=mic_device)
+            logger.info("using DesktopRobot — live Mac mic & speaker (no simulator CPU needed)")
     else:
         from mitra.robot.reachy import ReachyRobot
 
@@ -169,7 +173,7 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
             mic_chunk_s=config["robot"].get("mic_chunk_s", 0.08),
             mic_source=mic_source,
             built_in_mic_device=config["robot"].get(
-                "built_in_mic_device", "MacBook Pro Microphone"),
+                "built_in_mic_device", "MacBook Neo Microphone"),
         )
 
     agent = MitraAgent(models["llm"], build_tools(robot, tts))
@@ -209,8 +213,8 @@ def main() -> int:
                         help="mirror the conversation on the console (FR-7.2)")
     parser.add_argument("--check", action="store_true",
                         help="report component availability and exit")
-    parser.add_argument("--robot", choices=["reachy", "fake"], default=None,
-                        help="override robot backend from config")
+    parser.add_argument("--robot", choices=["reachy", "desktop", "fake"], default=None,
+                        help="robot backend: reachy (daemon/sim), desktop (live Mac mic/speaker, no sim CPU), fake")
     args = parser.parse_args()
 
     config = load_config(args.config)

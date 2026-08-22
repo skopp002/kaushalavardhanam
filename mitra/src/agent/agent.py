@@ -7,12 +7,16 @@ owns the conversation loop, message history, and tool dispatch.
 
 from __future__ import annotations
 
+import json
+import urllib.request
+
 from .prompts import SANSKRIT_SYSTEM_PROMPT
 
 
 class MitraAgent:
     def __init__(self, llm_config: dict, tools: list,
                  system_prompt: str = SANSKRIT_SYSTEM_PROMPT, verbose: bool = True):
+        self._llm_config = llm_config
         try:
             from strands import Agent
         except ImportError as e:
@@ -59,6 +63,31 @@ class MitraAgent:
     def converse(self, message: str) -> str:
         """One turn: user message in, final agent text out (tools may run)."""
         return str(self._agent(message)).strip()
+
+    def warmup(self) -> None:
+        """Load the configured local model without invoking its tool loop."""
+        self.warmup_model(self._llm_config)
+
+    @staticmethod
+    def warmup_model(cfg: dict) -> None:
+        """Warm an Ollama model with one token and no agent tools."""
+        if cfg.get("provider", "ollama") != "ollama":
+            return
+        host = cfg.get("host", "http://localhost:11434").rstrip("/")
+        payload = json.dumps({
+            "model": cfg.get("id", "qwen3-vl:8b"),
+            "prompt": "Warm up.",
+            "stream": False,
+            "keep_alive": cfg.get("keep_alive", "30m"),
+            "think": False,
+            "options": {"num_predict": 1},
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            f"{host}/api/generate", data=payload,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=120) as response:
+            json.load(response)
 
     def reset(self) -> None:
         """Drop conversation history at session end (FR-3.3: per-session context)."""

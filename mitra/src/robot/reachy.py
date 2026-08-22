@@ -24,7 +24,7 @@ class ReachyRobot:
     """Connects to the reachy-mini daemon (real robot or --sim)."""
 
     def __init__(self, mic_chunk_s: float = 0.08, mic_source: str = "robot",
-                 built_in_mic_device: str = "MacBook Pro Microphone"):
+                 built_in_mic_device: str = "MacBook Neo Microphone"):
         """mic_source: "robot" (default) reads the robot's own mic through the
         SDK. "built_in" instead captures from a Mac input device via
         sounddevice/PortAudio — a workaround for a macOS 26 (Tahoe) Core Audio
@@ -42,7 +42,6 @@ class ReachyRobot:
             ) from e
         self._create_head_pose = create_head_pose
         self._mini = ReachyMini()
-        self._mini.media.start_recording()
         self._mini.media.start_playing()
         self._out_sr = int(self._mini.media.get_output_audio_samplerate())
         self._mic_chunk_s = mic_chunk_s
@@ -64,6 +63,7 @@ class ReachyRobot:
             self._in_sr = 16000  # matches mitra.audio.TARGET_SAMPLERATE
             self._start_built_in_mic(built_in_mic_device)
         elif mic_source == "robot":
+            self._mini.media.start_recording()
             self._in_sr = int(self._mini.media.get_input_audio_samplerate())
             self._mic_cap = 30 * self._in_sr  # ring: keep at most 30 s
             threading.Thread(target=self._mic_drain_loop_robot, daemon=True).start()
@@ -121,7 +121,7 @@ class ReachyRobot:
         self._mic_cap = 30 * self._in_sr
 
         def callback(indata, frames, time_info, status):  # noqa: ARG001
-            mono = np.asarray(indata, dtype=np.float32)
+            mono = np.asarray(indata, dtype=np.float32).copy()
             if mono.ndim == 2:
                 mono = mono.mean(axis=1)
             self._push_mic_chunk(mono)
@@ -296,7 +296,8 @@ class ReachyRobot:
             self._built_in_stream.stop()
             self._built_in_stream.close()
         try:
-            self._mini.media.stop_recording()
+            if self._mic_source == "robot":
+                self._mini.media.stop_recording()
             self._mini.media.stop_playing()
         finally:
             self._mini.__exit__(None, None, None)
@@ -378,3 +379,121 @@ class FakeReachy:
 
     def close(self) -> None:
         self.closed = True
+
+
+class DesktopRobot(FakeReachy):
+    """Standalone Mac desktop backend (no MuJoCo simulator / no reachy daemon needed).
+
+    Uses the Mac's microphone for live listening and speakers for live TTS audio playback,
+    while logging head motions/poses/emotions to the console with zero simulator CPU overhead.
+    """
+
+    def __init__(self, mic_chunk_s: float = 0.08, device_name: str = "MacBook Neo Microphone"):
+        super().__init__(mic_samplerate=16000)
+        self._mic_chunk_s = mic_chunk_s
+        self._in_sr = 16000
+        self._mic_buf: deque[np.ndarray] = deque()
+        self._mic_samples = 0
+        self._mic_cap = 30 * self._in_sr
+        self._mic_ready = threading.Condition()
+        self._playing = False
+        self._closed = threading.Event()
+        self._start_mic(device_name)
+
+    def _start_mic(self, device_name: str) -> None:
+        import sounddevice as sd
+
+        def callback(indata, frames, time_info, status):
+            mono = np.asarray(indata, dtype=np.float32).copy()
+            if mono.ndim == 2:
+                mono = mono.mean(axis=1)
+            with self._mic_ready:
+                self._mic_buf.append(mono)
+                self._mic_samples += len(mono)
+                while self._mic_samples > self._mic_cap:
+                    self._mic_samples -= len(self._mic_buf.popleft())
+                self._mic_ready.notify_all()
+
+        try:
+            self._stream = sd.InputStream(
+                device=device_name, channels=1, samplerate=self._in_sr,
+                blocksize=int(self._in_sr * 0.02), callback=callback,
+            )
+            self._stream.start()
+        except Exception:
+            # Fall back to default system input device
+            self._stream = sd.InputStream(
+                channels=1, samplerate=self._in_sr,
+                blocksize=int(self._in_sr * 0.02), callback=callback,
+            )
+            self._stream.start()
+
+    def mic_read(self) -> np.ndarray:
+        target = int(self._in_sr * self._mic_chunk_s)
+        deadline = time.monotonic() + max(0.2, 2 * self._mic_chunk_s)
+        with self._mic_ready:
+            while self._mic_samples < target and not self._closed.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._mic_ready.wait(timeout=remaining)
+            if not self._mic_buf:
+                return np.zeros(0, dtype=np.float32)
+            chunks, taken = [], 0
+            while self._mic_buf and taken < target:
+                chunk = self._mic_buf.popleft()
+                chunks.append(chunk)
+                taken += len(chunk)
+            self._mic_samples -= taken
+        return np.concatenate(chunks)
+
+    def flush_mic(self) -> None:
+        with self._mic_ready:
+            self._mic_buf.clear()
+            self._mic_samples = 0
+
+    def speaker_play(self, wav: np.ndarray, samplerate: int, block: bool = True) -> None:
+        import sounddevice as sd
+
+        self.played.append(np.asarray(wav))
+        self._playing = True
+        sd.play(wav, samplerate)
+        if block:
+            sd.wait()
+            self._playing = False
+
+    def speaker_busy(self) -> bool:
+        import sounddevice as sd
+
+        try:
+            return bool(sd.get_stream() and sd.get_stream().active)
+        except Exception:
+            return False
+
+    def speaker_stop(self) -> None:
+        import sounddevice as sd
+
+        sd.stop()
+        self._playing = False
+
+    def nod(self) -> None:
+        super().nod()
+        print("🤖 [Robot Head] *Nodding*")
+
+    def pose(self, name: str, duration: float = 0.5) -> None:
+        super().pose(name, duration)
+        print(f"🤖 [Robot Pose] -> {name}")
+
+    def play_emotion(self, name: str, block: bool = False, sound: bool = True) -> None:
+        super().play_emotion(name, block, sound)
+        print(f"🤖 [Robot Emotion] -> {name}")
+
+    def close(self) -> None:
+        self._closed.set()
+        if hasattr(self, "_stream"):
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+        super().close()

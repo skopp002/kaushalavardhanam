@@ -1,62 +1,64 @@
-"""Local ASR (FR-4.2): Whisper via mlx-whisper for en/kn, with an optional
-Sanskrit fine-tune rescue pass.
+"""Audio-first ASR: mlx-whisper unified multilingual transcription on Apple Silicon.
 
-Whisper has no Sanskrit language code — Devanagari output usually comes back
-tagged "hi". When the transcript is Devanagari-dominant and a Sanskrit model is
-configured, the audio is re-transcribed with the fine-tune and tagged "sa"
-(experimental, REQUIREMENTS R7).
+Extracts both transcript text and detected language directly in a single forward pass.
 """
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
-from mitra import language_detector
+logger = logging.getLogger("mitra")
 
 
 class Transcriber:
-    def __init__(self, default_model: str = "mlx-community/whisper-large-v3-mlx",
-                 sanskrit_model: str | None = None, backend: str = "mlx",
-                 device: str = "mps"):
-        if backend != "mlx":
-            raise ValueError(f"unsupported ASR backend: {backend!r} (v1 uses mlx)")
-        self._default_model = default_model
-        self._sanskrit_model = sanskrit_model
-        self._device = device
-        self._sa_pipeline = None  # lazy: only load if Sanskrit is actually spoken
+    """Transcribe 16 kHz mono audio and return ``(text, detected_language)``."""
+
+    def __init__(self, *, model: str = "mlx-community/whisper-large-v3-turbo",
+                 english_fallback_model: str | None = None,
+                 transcribe_fn=None, **kwargs):
+        # Support 'model' as well as legacy 'english_fallback_model'
+        self._model_id = model or english_fallback_model or "mlx-community/whisper-large-v3-turbo"
+        self._transcribe_fn = transcribe_fn
 
     def transcribe(self, audio_16k_mono: np.ndarray) -> tuple[str, str | None]:
-        """Returns (transcript, language hint from the ASR engine)."""
+        audio = _normalise_audio(audio_16k_mono)
+        peak = float(np.abs(audio_16k_mono).max()) if len(audio_16k_mono) else 0.0
+        if peak < 0.008:
+            return "", None
+
+        if self._transcribe_fn is not None:
+            result = self._transcribe_fn(audio)
+            if isinstance(result, tuple):
+                return result
+            return str(result).strip(), None
+
         import mlx_whisper
 
-        audio = np.asarray(audio_16k_mono, dtype=np.float32)
-        peak = float(np.abs(audio).max())
-        if peak > 0:  # normalize: Whisper mis-hears quiet capture badly
-            audio = audio / peak * 0.9
         result = mlx_whisper.transcribe(
             audio,
-            path_or_hf_repo=self._default_model,
+            path_or_hf_repo=self._model_id,
+            condition_on_previous_text=False,
+            initial_prompt="English, Sanskrit, Kannada conversation with Mitra.",
         )
-        text = result.get("text", "").strip()
-        lang = result.get("language")
+        text = str(result.get("text", "")).strip()
+        language = result.get("language")
+        if language:
+            language = str(language).lower()
+        logger.info("ASR transcript: %r (detected lang: %s)", text, language)
+        return text, language
 
-        if self._sanskrit_model and language_detector.detect(text, lang) == "sa":
-            try:
-                text, lang = self._transcribe_sanskrit(audio_16k_mono), "sa"
-            except Exception:  # experimental path must not break the turn (R7)
-                pass
-        return text, lang
+    def warmup(self) -> None:
+        """Load the whisper model before microphone processing begins."""
+        silence = np.zeros(8000, dtype=np.float32)
+        try:
+            self.transcribe(silence)
+        except Exception:
+            logger.exception("ASR warmup failed")
 
-    def _transcribe_sanskrit(self, audio: np.ndarray) -> str:
-        if self._sa_pipeline is None:
-            from transformers import pipeline
 
-            self._sa_pipeline = pipeline(
-                "automatic-speech-recognition",
-                model=self._sanskrit_model,
-                device=self._device,
-            )
-        out = self._sa_pipeline(
-            {"array": np.asarray(audio, dtype=np.float32), "sampling_rate": 16000}
-        )
-        return out["text"].strip()
+def _normalise_audio(audio_16k_mono: np.ndarray) -> np.ndarray:
+    audio = np.asarray(audio_16k_mono, dtype=np.float32).reshape(-1)
+    peak = float(np.abs(audio).max()) if audio.size else 0.0
+    return audio / peak * 0.9 if peak > 0 else audio

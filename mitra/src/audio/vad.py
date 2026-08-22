@@ -25,11 +25,11 @@ class EnergySegmenter:
     on one setup is deaf on another. Pass ``threshold`` to pin it instead.
     """
 
-    _FLOOR_RATIO = 2.5
+    _FLOOR_RATIO = 1.8
 
     def __init__(self, samplerate: int = TARGET_SAMPLERATE,
-                 threshold: float | None = None, min_gate: float = 0.004,
-                 min_speech_s: float = 0.3, min_silence_s: float = 0.8,
+                 threshold: float | None = None, min_gate: float = 0.0035,
+                 min_speech_s: float = 0.3, min_silence_s: float = 0.4,
                  max_utterance_s: float = 15.0):
         self._sr = samplerate
         self._threshold = threshold
@@ -90,7 +90,7 @@ class SileroSegmenter:
     _WINDOW = 512
 
     def __init__(self, samplerate: int = TARGET_SAMPLERATE,
-                 min_silence_s: float = 0.8, max_utterance_s: float = 15.0,
+                 min_silence_s: float = 0.4, max_utterance_s: float = 15.0,
                  preroll_s: float = 0.2):
         try:
             import torch  # noqa: F401
