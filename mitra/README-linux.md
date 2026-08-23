@@ -261,11 +261,37 @@ microphone to stream.
 curl -s localhost:11434 && echo
 ```
 
+**Sanskrit checks (one-time setup).** Mitra validates every reply against a
+real Sanskrit lexicon rather than a list of banned words; the data is ~78 MB
+and lives outside git:
+
+```bash
+pip install 'mitra[sanskrit]'
+python3 scripts/fetch_sanskrit_data.py        # vidyut morphology + Cologne dicts
+python3 scripts/build_dictionary.py           # index MW/Apte for the review CLI
+python3 scripts/eval_grammar.py               # score the checks on real sentences
+```
+
+Without it Mitra runs exactly as before, logging one warning at startup.
+
 **Terminal 3 — Mitra:**
 
 ```bash
 python3 main.py --debug
 ```
+
+`--debug` also mirrors every spoken line in English, so the console is
+readable without Devanagari:
+
+```
+INFO mitra: speak: मह्यं गणितं रोचते।
+INFO mitra: speak (en): Mathematics is pleasing to me.
+```
+
+The gloss is a second, history-free call to the same Ollama model (~0.4 s,
+made after playback starts, so it never delays speech) and it translates
+literally — a mangled reply reads as mangled English rather than being
+quietly repaired. Turn it off with `logging.gloss_english: false`.
 
 First run downloads ~2 GB of Whisper and TTS weights. Progress bars are
 suppressed by `HF_HUB_DISABLE_PROGRESS_BARS` in `main.py`; to watch progress,

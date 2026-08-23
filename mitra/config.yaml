@@ -78,6 +78,10 @@ models:
 
 agent:
   deterministic_vision: false # true = orchestrator-mediated capture_image (DESIGN §1.4)
+  max_history_turns:
+    4 # exchanges kept in the model's context. Qwen imitates its own
+    # recent output more than the few-shot examples, so a bad
+    # phrasing repeats until it ages out of the window. 0 = keep all.
 
 cloud_fallback: # FR-6.3 — no key/provider configured == feature absent
   enabled: false
@@ -87,10 +91,46 @@ cloud_fallback: # FR-6.3 — no key/provider configured == feature absent
 session:
   silence_timeout_s: 30
   max_reply_chars: 220
+  max_sentences:
+    1 # replies are truncated to this many sentences. Every logged
+    # reply appended a stock "and you?", and that trailing question
+    # carried most of the grammar errors. 2 allows it back.
 
 lexicon:
   db_path: "data/lexicon.db"
 
+# Morphology-backed checks over every reply (DESIGN §5). The Devanagari ratio
+# in validator.py cannot see Hindi written in Devanagari — खेलानि, आज, घरे and
+# मक्खनम् all scored 1.00 and were spoken — and cannot see invented verb forms
+# like करोष्यसि at all. These can.
+#   pip install 'mitra[sanskrit]' && python3 scripts/fetch_sanskrit_data.py
+# Absent data disables the checks with a warning; nothing else changes.
+sanskrit:
+  enabled: true
+  data_dir: "data/vidyut"
+  checks:
+    # unattested: the word is not a form of any Sanskrit word (करोष्यसि, कुरुमि,
+    #             मक्खनम्, दालः). Measured: rejects 0/20 hand-verified sentences
+    #             in Mitra's register, ~17% of the adult phrasebook's.
+    # agreement:  subject and verb disagree in person (भवान् … पठसि, अहं …
+    #             चलन्ति). The most reliable of the three: ~0.7% on correct text.
+    # vocabulary: a real Sanskrit word, but not one on Mitra's list — this is
+    #             the check that catches आज, घरे, खेलानि. Strictest of the
+    #             three; drop it here to log those without rejecting.
+    - unattested
+    - agreement
+    - vocabulary
+  ground_in_phrasebook:
+    true # widen the vocabulary with the phrasebook corpus. The
+    # model is told to imitate those sentences, so refusing
+    # their words would punish it for complying.
+
 logging:
   dir: "logs"
   debug: false
+  gloss_english:
+    true # --debug only: log an English translation of every line
+    # Mitra speaks ("speak (en): ..."), so the console is
+    # readable without Devanagari. Costs one extra call to
+    # the same local model per distinct line, made after
+    # playback starts — never on the path to the speaker.

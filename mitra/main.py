@@ -110,6 +110,26 @@ def check(config: dict) -> int:
     store = LexiconStore()  # in-memory, seeds from the bundled JSON
     print(f"lexicon: {store.count()} seed entries")
 
+    from mitra.lexicon.dictionary import Dictionary
+    from mitra.sanskrit import Analyzer
+
+    settings = config.get("sanskrit", {})
+    analyzer = Analyzer(settings.get("data_dir", "data/vidyut"))
+    if analyzer.available:
+        from mitra.lexicon.vocabulary import Vocabulary
+
+        vocabulary = Vocabulary(analyzer, seed_path=_ROOT / "src" / "lexicon" /
+                                "seed_lexicon.json")
+        print(f"sanskrit: kosha ok, {len(vocabulary.lemmas)} allowed lemmas, "
+              f"checks {', '.join(settings.get('checks', ()))}")
+    else:
+        print("sanskrit: MISSING morphology data — replies are checked for "
+              "script only.\n  pip install 'mitra[sanskrit]' && "
+              "python3 scripts/fetch_sanskrit_data.py")
+    dictionary = Dictionary()
+    print(f"dictionary: {'ok' if dictionary.available else 'MISSING'} "
+          f"(Cologne MW/Apte, used by mitra-lexicon)")
+
     pb_path = config.get("phrasebook", {}).get("path", "data/phrasebook.jsonl")
     phrasebook = Phrasebook(pb_path)
     if phrasebook.count():
@@ -120,8 +140,37 @@ def check(config: dict) -> int:
     return 0
 
 
+def _build_grammar_checker(config: dict, phrasebook, logger):
+    """Analyzer + vocabulary + enabled checks, or None if switched off.
+
+    Every failure here is non-fatal by design: the checks are an addition to
+    the deterministic validator, not a prerequisite for speaking (FR-6.4).
+    """
+    settings = config.get("sanskrit", {})
+    if not settings.get("enabled", True):
+        return None
+    from mitra.lexicon.vocabulary import Vocabulary
+    from mitra.sanskrit import Analyzer
+    from mitra.sanskrit.grammar import DEFAULT_CHECKS, Checker
+
+    analyzer = Analyzer(settings.get("data_dir", "data/vidyut"), logger)
+    if not analyzer.available:
+        return None
+    extra: tuple[str, ...] = ()
+    if settings.get("ground_in_phrasebook", True) and phrasebook is not None:
+        extra = tuple(phrasebook.sentences())
+    vocabulary = Vocabulary(
+        analyzer, seed_path=Path(__file__).resolve().parent / "src" /
+        "lexicon" / "seed_lexicon.json",
+        extra_texts=extra, logger_=logger)
+    checks = tuple(settings.get("checks", DEFAULT_CHECKS))
+    logger.info("sanskrit checks enabled: %s", ", ".join(checks) or "none")
+    return Checker(analyzer, vocabulary, checks)
+
+
 def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
-    logger = setup_logging(debug or config["logging"].get("debug", False))
+    debug = debug or config["logging"].get("debug", False)
+    logger = setup_logging(debug)
 
     from mitra.agent.agent import MitraAgent
     from mitra.agent.tools import build_tools
@@ -217,7 +266,9 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     # reply tokens straight to stdout and interleaves them with the log lines
     # ("क2026-08-08 23:07:56 INFO mitra: speak: ..."). The --debug log already
     # carries every reply, so nothing is lost.
-    agent = MitraAgent(models["llm"], build_tools(robot, tts), verbose=False)
+    agent = MitraAgent(
+        models["llm"], build_tools(robot, tts), verbose=False,
+        max_history_turns=config.get("agent", {}).get("max_history_turns", 4))
 
     fallback_factory = None
     cloud = config.get("cloud_fallback", {})
@@ -225,16 +276,40 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
         fallback_factory = lambda: MitraAgent(  # noqa: E731
             {"provider": cloud["provider"], "id": cloud["model_id"]},
             build_tools(robot, tts), verbose=False,
+            max_history_turns=config.get("agent", {}).get("max_history_turns", 4),
+        )
+
+    # Morphology checks over every reply (DESIGN §5). Built after the
+    # phrasebook so the vocabulary can absorb it, and before the agent so a
+    # missing dataset is reported once at startup rather than per turn.
+    grammar_checker = _build_grammar_checker(config, phrasebook, logger)
+
+    # Debug runs mirror every spoken line in English (FR-7.2). It is a second,
+    # history-free call to the same Ollama model — no extra VRAM, and it runs
+    # after playback starts, so it never delays speech. Off outside --debug,
+    # and switchable there with logging.gloss_english.
+    glosser = None
+    if debug and config["logging"].get("gloss_english", True):
+        from mitra.gloss import GLOSS_SYSTEM_PROMPT, Glosser
+
+        glosser = Glosser(
+            lambda: MitraAgent(models["llm"], [],
+                               system_prompt=GLOSS_SYSTEM_PROMPT,
+                               verbose=False, max_history_turns=0),
+            logger=logger,
         )
 
     orchestrator = Orchestrator(
         robot=robot, agent=agent, tts=tts, lexicon=lexicon,
         wake=wake, segmenter=segmenter, asr=asr, phrasebook=phrasebook,
         turn_logger=TurnLogger(config["logging"]["dir"], logger),
+        glosser=glosser,
+        grammar_checker=grammar_checker,
         logger=logger,
         gestures=config["robot"].get("gestures", True),
         silence_timeout_s=config["session"]["silence_timeout_s"],
         max_reply_chars=config["session"]["max_reply_chars"],
+        max_sentences=config["session"].get("max_sentences", 1),
         fallback_agent_factory=fallback_factory,
     )
     try:
