@@ -1,8 +1,8 @@
 # Mitra runtime configuration (DESIGN.md §7)
 #
-# Platform note: tuned here for the Linux host (x86_64 + RTX 3070 mobile,
-# 8 GB VRAM). macOS/M1 Max values are kept inline as comments so one file
-# serves both. The mlx and parler paths are Apple-Silicon-only.
+# Platform note: tuned here for macOS on Apple Silicon (M1 Max, 32 GB unified
+# memory). Linux values are kept inline as comments so one file serves both.
+# The mlx and parler paths are Apple-Silicon-only.
 
 robot:
   backend: reachy # reachy (real Lite over USB, or --sim daemon) | fake
@@ -19,8 +19,8 @@ robot:
     # webrtc plugin (webrtcsink), absent on Ubuntu 22.04 —
     # run the daemon with --no-media and capture here.
   built_in_mic_device:
-    "pulse" # linux: PulseAudio/PipeWire default source.
-    # mac: "MacBook Pro Microphone".
+    "MacBook Pro Microphone" # mac: the laptop's own mic.
+    # linux: "pulse" (PulseAudio/PipeWire default source).
     # List candidates: python -c "import sounddevice as sd;
     # print(sd.query_devices())"
 
@@ -33,26 +33,27 @@ models:
       # variant: slow and returns empty content
     keep_alive:
       "30m" # keeps the model resident between turns (REQUIREMENTS §8).
-      # On 8 GB VRAM this leaves no room for ASR/TTS on the
-      # GPU, which is why both sit on cpu below.
+      # The M1 Max's 32 GB unified memory has room for the
+      # speech models on mps alongside it.
     temperature: 0.3
   asr:
     # turbo: half the download of large-v3 and 4-6x faster decoding at
     # near-equal en/kn accuracy — the first latency lever in REQUIREMENTS §8.
-    # Drop to openai/whisper-small (~500 MB) if disk or RAM is tight.
-    default: "openai/whisper-small" # mac: mlx-community/whisper-large-v3-turbo
+    # This is the fastest path on this host: mlx runs Whisper on the Metal GPU.
+    default: "mlx-community/whisper-large-v3-turbo" # linux: openai/whisper-small
     sanskrit: null # HF repo of a Sanskrit Whisper fine-tune, once selected (Phase 3)
-    backend: "transformers" # transformers (linux) | mlx (mac, Apple Silicon only)
-    device: "cpu" # mac: mps. cuda:0 here would contend with Qwen for VRAM
+    backend: "mlx" # mlx (mac, Apple Silicon only) | transformers (linux)
+    device: "mps" # linux: cpu
   tts:
     engine:
-      "vits" # vits (linux) | indic-parler-tts (mac)
-      # parler-tts pins transformers<=4.46.1, which collides
-      # with reachy-mini's huggingface-hub>=1.17 — the two
-      # are not co-installable (see src/speech/tts.py)
-    model: "facebook/mms-tts-hin" # ungated VITS; mac: ai4bharat/indic-parler-tts
-    fallback: "facebook/mms-tts-hin" # used when the primary model is inaccessible
-    device: "cpu" # mac: mps
+      "indic-parler-tts" # indic-parler-tts (mac) | vits (linux)
+      # parler-tts pins transformers<=4.46.1 and collides with
+      # reachy-mini's huggingface-hub>=1.17. If pip refuses to
+      # install both, set this to "vits" — synthesize() also
+      # degrades to VITS on its own (see src/speech/tts.py).
+    model: "ai4bharat/indic-parler-tts" # gated repo: accept the conditions on HF first
+    fallback: "facebook/mms-tts-hin" # ungated VITS; used when parler is inaccessible
+    device: "mps" # linux: cpu
     # Parler-TTS is steered by describing the voice in words, not by picking
     # a named voice — edit this description to change how Mitra sounds.
     # Ignored by engine: vits, which has no voice steering.
@@ -64,10 +65,10 @@ models:
     engine: "asr"
     phrase: "mitra"
     asr_model:
-      "openai/whisper-small" # tiny mis-hears "mitra"; small is accurate
-      # (see src/audio/wake.py). mac: mlx-community/whisper-small-mlx
-    backend: "transformers" # transformers (linux) | mlx (mac)
-    device: "cpu" # runs on every gated speech window — keep it off the GPU
+      "mlx-community/whisper-small-mlx" # tiny mis-hears "mitra"; small is
+      # accurate (see src/audio/wake.py). linux: openai/whisper-small
+    backend: "mlx" # mlx (mac) | transformers (linux)
+    device: "cpu" # transformers path only; mlx uses Metal regardless
     model: "models/mitra.onnx" # used by engine: openwakeword
     threshold: 0.6
   vad:
