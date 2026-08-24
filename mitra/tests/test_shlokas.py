@@ -121,7 +121,7 @@ def test_format_closes_the_verse_and_appends_the_colophon():
 
 
 def test_format_does_not_double_the_terminator():
-    """16 of the 957 corpus rows already end in a single danda."""
+    """15 of the 629 corpus rows already end in a single danda."""
     row = dict(ROW, verse_text="अध्युवास रथं तत्वरे तथा।")
     assert sl.format_recitation(row).startswith("अध्युवास रथं तत्वरे तथा ॥")
 

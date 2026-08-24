@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import logging
 import sys
 import time
 from pathlib import Path
@@ -44,6 +45,10 @@ QUESTIONS = [
     "What's your favorite food?", "What's your favorite subject?",
     "What are you reading?", "Do you listen to music?", "Do you play sports?",
     "What will you do today?", "Will you be my friend?",
+    # The deterministic path (DESIGN §1.4): no model call, so this one also
+    # says whether the corpus is wired up at all — a bare "I cannot" here
+    # means the request fell through to the model.
+    "Can you recite a shloka?",
 ]
 
 
@@ -51,6 +56,24 @@ def load_questions(path: Path) -> list[tuple[str | None, str]]:
     """(question_id, text) pairs from an eval set, or from the default script."""
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     return [(q.get("id"), q["text"]) for q in data["questions"]]
+
+
+class SpokenLines(logging.Handler):
+    """The exact line the orchestrator handed to the speaker.
+
+    Not the same as what SilentTTS receives: a recitation is split at its
+    dandas and synthesized chunk by chunk, so the marks and the assembled
+    verse-plus-colophon survive only here.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if message.startswith("speak: "):
+            self.lines.append(message[len("speak: "):])
 
 
 class SilentTTS:
@@ -62,6 +85,9 @@ class SilentTTS:
     def synthesize(self, text: str):
         import numpy as np
 
+        # One call per chunk for a recitation, which the orchestrator splits
+        # at its dandas — so this list holds pieces, not lines. What was
+        # actually spoken is in SpokenLines.
         self.spoken.append(text)
         return np.zeros(16, dtype=np.float32), 16000
 
@@ -69,7 +95,8 @@ class SilentTTS:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
-    ap.add_argument("-q", "--question", action="append", dest="questions")
+    ap.add_argument("-q", "--question", action="append", dest="ask",
+                    help="ask this instead of the built-in script (repeatable)")
     ap.add_argument("--gloss", action="store_true",
                     help="translate each reply back to English (a 2nd model call)")
     ap.add_argument("--no-checks", action="store_true",
@@ -87,10 +114,12 @@ def main() -> int:
     from mitra.agent.tools import build_tools
     from mitra.logging_subsystem import TurnLogger
     from mitra.lexicon.phrasebook import Phrasebook
+    from mitra.lexicon.shlokas import Shlokas
     from mitra.lexicon.store import LexiconStore
     from mitra.logging_subsystem import setup_logging
     from mitra.orchestrator import Event, Orchestrator, State
     from mitra.robot.reachy import FakeReachy
+    from mitra.speech import tts as tts_module
 
     main_spec = importlib.util.spec_from_file_location("mitra_main", ROOT / "main.py")
     mitra_main = importlib.util.module_from_spec(main_spec)
@@ -117,10 +146,14 @@ def main() -> int:
                 self.set("question_id", self.question_id)
 
     robot, tts = FakeReachy(), SilentTTS()
+    spoken = SpokenLines()
+    logger.addHandler(spoken)
     turn_logger = EvalTurnLogger(args.log_dir, logger) if args.log_dir else None
     phrasebook = Phrasebook(
         config.get("phrasebook", {}).get("path", str(ROOT / "data/phrasebook.jsonl")))
     checker = mitra_main._build_grammar_checker(config, phrasebook, logger)
+    shloka_cfg = config.get("shlokas", {})
+    shlokas = Shlokas(shloka_cfg.get("path", str(ROOT / "data/shlokas.json")))
 
     glosser = None
     if args.gloss:
@@ -135,16 +168,19 @@ def main() -> int:
         robot=robot, agent=MitraAgent(config["models"]["llm"],
                                       build_tools(robot, tts), verbose=False),
         tts=tts, lexicon=LexiconStore(config["lexicon"]["db_path"]),
-        phrasebook=phrasebook, glosser=glosser, grammar_checker=checker,
+        phrasebook=phrasebook, shlokas=shlokas, glosser=glosser,
+        grammar_checker=checker,
         turn_logger=turn_logger, logger=logger, gestures=False,
         max_reply_chars=config["session"]["max_reply_chars"],
         max_sentences=config["session"].get("max_sentences", 1),
+        verse_pause_s=shloka_cfg.get("verse_pause_s", tts_module.VERSE_PAUSE_S),
+        line_pause_s=shloka_cfg.get("line_pause_s", tts_module.LINE_PAUSE_S),
     )
 
     if args.questions:
         questions = load_questions(Path(args.questions))
     else:
-        questions = [(None, q) for q in (args.question or QUESTIONS)]
+        questions = [(None, q) for q in (args.ask or QUESTIONS)]
 
     print(f"\n{'='*72}\nchecks: "
           f"{', '.join(checker.checks) if checker else 'DISABLED'}\n{'='*72}")
@@ -153,10 +189,11 @@ def main() -> int:
         if turn_logger is not None:
             turn_logger.question_id = question_id
         orchestrator.state = State.LISTENING
-        spoken_before = len(tts.spoken)
+        spoken_before = len(spoken.lines)
         turn = time.monotonic()
         orchestrator.handle_event(Event("utterance", question))
-        reply = tts.spoken[-1] if len(tts.spoken) > spoken_before else "(nothing)"
+        said = spoken.lines[spoken_before:]
+        reply = " ".join(said) if said else "(nothing)"
         label = f"{question_id}  " if question_id else ""
         print(f"\n  {label}you:   {question}")
         print(f"  {' ' * len(label)}mitra: {reply}   [{time.monotonic() - turn:.1f}s]")

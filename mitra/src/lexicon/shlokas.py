@@ -14,7 +14,7 @@ because they are the wrong instrument here. ``max_sentences: 1`` would cut the
 verse at its internal danda, and the vocabulary check rejects epic Sanskrit
 wholesale — correct for generated conversation, nonsense for Vyāsa. (The
 220-char limit happens to clear this corpus, whose longest formatted verse is
-182; a longer text would not, and that is one more reason not to route
+160; a longer text would not, and that is one more reason not to route
 recitation through a gate meant for one-sentence replies.)
 
 Corpus shape — a JSON array (or JSONL, one object per line) of:
@@ -59,13 +59,14 @@ DOUBLE_DANDA = "॥"
 
 # Rows the corpus builder left with editorial apparatus in the verse itself —
 # "व्ययं कुर्वन्(र्यात्?)" is an editor asking a question about a manuscript
-# reading, not something to recite. Two rows in the 957-verse corpus; the guard
-# is cheap and the failure it prevents (the robot solemnly reciting a
-# parenthesis) is not.
+# reading, not something to recite. No row in the present 629-verse corpus
+# trips it — the two that did are not in it any more — but the guard stays:
+# it is cheap, it is the next corpus build it protects, and the failure it
+# prevents (the robot solemnly reciting a parenthesis) is not cheap.
 _APPARATUS = re.compile(r"[()\[\]?*]|[A-Za-z]")
 
-# Trailing terminators are stripped before the closing ॥ is appended: 16 of the
-# 957 rows already end in a single danda, and "... तथा। ॥" would read as a
+# Trailing terminators are stripped before the closing ॥ is appended: 15 of the
+# 629 rows already end in a single danda, and "... तथा। ॥" would read as a
 # half-verse break immediately followed by a full one.
 _TRAILING_MARKS = " \t।॥"
 

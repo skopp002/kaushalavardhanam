@@ -13,6 +13,9 @@ data/*
 # works), and without it a fresh clone cannot recite. The phrasebook stays
 # ignored — that one is copyrighted (see lexicon/phrasebook.py).
 !data/shlokas.json
+# ...and the record of what the corpus filter removed and why, which is the
+# audit trail for FR-3.10/FR-3.11 (scripts/filter_shlokas.py).
+!data/shlokas-rejected.json
 models/*.onnx
 sim_frame.jpg
 clips/
