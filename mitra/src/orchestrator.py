@@ -7,10 +7,11 @@ loop's thread. Two daemon helpers — the audio pump and the playback watcher �
 communicate with the core only by putting events on the queue (DESIGN §3).
 Tests drive ``handle_event`` directly with fakes; ``run()`` adds the threads.
 
-The agent may call tools itself, but three paths stay deterministic regardless
+The agent may call tools itself, but four paths stay deterministic regardless
 of model quality (DESIGN §1.4): ``nod`` fires here on wake, unintelligible
-transcripts are refused here before the model ever sees them, and every reply
-passes the validator and is spoken here.
+transcripts are refused here before the model ever sees them, a request to
+recite a shloka is answered from the verse corpus without consulting the model
+at all, and every generated reply passes the validator and is spoken here.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from mitra import language_detector
 from mitra.agent import prompts, validator
 from mitra.agent.tools import END_SESSION_SENTINEL
 from mitra.audio import TARGET_SAMPLERATE, resample
+from mitra.lexicon import shlokas as shloka_corpus
+from mitra.speech.tts import LINE_PAUSE_S, VERSE_PAUSE_S, synthesize_with_pauses
 
 
 # "explain in English" detection (FR-3.2 exception): explicit request only —
@@ -91,11 +94,14 @@ class Event:
 class Orchestrator:
     def __init__(self, *, robot, agent, tts, lexicon,
                  wake=None, segmenter=None, asr=None, phrasebook=None,
+                 shlokas=None,
                  turn_logger=None, glosser=None, grammar_checker=None,
                  logger: logging.Logger | None = None,
                  silence_timeout_s: float = 30.0,
                  max_reply_chars: int = validator.MAX_REPLY_CHARS,
                  max_sentences: int = 1,
+                 verse_pause_s: float = VERSE_PAUSE_S,
+                 line_pause_s: float = LINE_PAUSE_S,
                  fallback_agent_factory=None, gestures: bool = True):
         self.robot = robot
         self.agent = agent
@@ -109,6 +115,9 @@ class Orchestrator:
         # weak Sanskrit priors answers an unclear turn by reciting one of them
         # verbatim — which is what makes three exchanges read as one.
         self.phrasebook = phrasebook
+        # Optional: verse corpus for "recite a shloka" (lexicon/shlokas.py).
+        # A deterministic path — the model is not asked to produce scripture.
+        self.shlokas = shlokas
         self.turn_logger = turn_logger
         # Optional (debug runs only): translates every spoken line back into
         # English for the log, so an operator who does not read Devanagari can
@@ -130,6 +139,9 @@ class Orchestrator:
         # one sentence; this is what makes it true. Set to 2 to allow a
         # follow-up question back.
         self.max_sentences = max_sentences
+        # Silence at the dandas, in seconds (mitra.speech.tts).
+        self.verse_pause_s = verse_pause_s
+        self.line_pause_s = line_pause_s
         self._fallback_agent_factory = fallback_agent_factory
         self._fallback_agent = None
 
@@ -139,6 +151,9 @@ class Orchestrator:
         self._sleep_after_speaking = False
         self._last_activity = time.monotonic()
         self._consecutive_retries = 0
+        # Set when the wake word cuts playback short, so the playback watcher
+        # knows not to flush the mic out from under the user (see _speak).
+        self._barge_in = threading.Event()
 
     # ------------------------------------------------------------------ run
 
@@ -175,7 +190,11 @@ class Orchestrator:
             if self.state == State.ASLEEP:
                 self._on_wake()
             elif self.state in (State.SPEAKING, State.WAKING):
-                # barge-in (DESIGN §1.3): stop playback, listen again
+                # barge-in (DESIGN §1.3): stop playback, listen again. The flag
+                # goes up first: _watch_playback is a live thread about to see
+                # the speaker fall idle, and its echo flush would take the rest
+                # of this sentence with it.
+                self._barge_in.set()
                 self.robot.speaker_stop()
                 self._to_listening()
         elif kind == "utterance" and self.state == State.LISTENING:
@@ -214,6 +233,14 @@ class Orchestrator:
         self._pose("listening")               # antennas perk up: "your turn"
         if self.segmenter:
             self.segmenter.reset()
+        if self.wake:
+            # The wake detector runs its own energy segmenter, and _audio_loop
+            # only feeds it while asleep or speaking. Leaving SPEAKING mid-window
+            # strands it inside an utterance — buffer half full, _in_speech still
+            # true — and nothing clears that until the session ends. The next
+            # barge-in is then judged on a window that opens with the tail of
+            # Mitra's own voice, which is exactly the audio it must not hear.
+            self.wake.reset()
 
     def _check_silence_timeout(self) -> None:
         if (self.state == State.LISTENING
@@ -228,6 +255,8 @@ class Orchestrator:
         self._sleep_after_speaking = False
         self._consecutive_retries = 0
         self.agent.reset()                    # context is per-session (FR-3.3)
+        if self.shlokas:
+            self.shlokas.reset()              # so does "don't repeat a verse"
         if self.wake:
             self.wake.reset()
         if self.segmenter:
@@ -319,6 +348,12 @@ class Orchestrator:
             return
 
         self._consecutive_retries = 0
+
+        recitation = self._recite_if_asked(transcript)
+        if recitation is not None:
+            self._finish_turn(recitation)
+            return
+
         explain_en = bool(_EXPLAIN_IN_ENGLISH_RE.search(transcript))
         message = self._build_message(transcript, lang, explain_en)
         if tl:
@@ -335,6 +370,35 @@ class Orchestrator:
             self._sleep_after_speaking = True
             reply = prompts.FAREWELL
         self._finish_turn(reply)
+
+    def _recite_if_asked(self, transcript: str) -> str | None:
+        """A verse from the corpus if this turn asked for one, else None.
+
+        Deterministic on purpose (DESIGN §1.4). Asked to recite, the model
+        invents something verse-shaped and misattributes it — and a child would
+        take that for scripture. The corpus is the answer, verbatim.
+
+        Falling through to None when there is no corpus is deliberate too: the
+        model will then say it cannot, which is true.
+        """
+        if self.shlokas is None or not shloka_corpus.is_recitation_request(transcript):
+            if self.shlokas is not None and shloka_corpus.looks_like_a_near_miss(transcript):
+                # Not a refusal — the turn goes on to the model as usual. This
+                # is the breadcrumb for the next spelling whisper invents (it
+                # has said "schlocker"): grep the log for it and widen the
+                # patterns in lexicon/shlokas.py from what was actually heard.
+                self.logger.debug("possible recitation request not recognized: %r",
+                                  transcript)
+            return None
+        row = self.shlokas.pick()
+        if row is None:
+            self.logger.info("shloka requested but the corpus is empty")
+            return None
+        verse_id = f"{row.get('source_slug', '?')} {row.get('verse_id', '?')}"
+        self.logger.info("reciting shloka %s", verse_id)
+        if self.turn_logger:
+            self.turn_logger.set("shloka", verse_id)
+        return shloka_corpus.format_recitation(row)
 
     def _finish_turn(self, reply: str) -> None:
         tl = self.turn_logger
@@ -485,9 +549,10 @@ class Orchestrator:
         Returns the English gloss of ``text`` when glossing is on, else None.
         """
         self.logger.info("speak: %s", text)
+        self._barge_in.clear()
         try:
             with self._tts_stage():
-                wav, samplerate = self.tts.synthesize(text)
+                wav, samplerate = self._synthesize(text)
             self.robot.speaker_play(wav, samplerate, block=False)
         except Exception:
             self.logger.exception("TTS/playback failure (FR-6.4)")
@@ -498,6 +563,23 @@ class Orchestrator:
         # a second model call, and it must not sit between a finished reply
         # and the speaker.
         return self._log_gloss(text)
+
+    def _synthesize(self, text: str) -> tuple[np.ndarray, int]:
+        """Waveform for a line, with the dandas of a recitation made audible.
+
+        ॥ marks recited verse and nothing else Mitra says, so it is the gate:
+        below it, ordinary replies take the single-call path they always have.
+        Above it, the line is synthesized in chunks joined by real silence —
+        the pause a reciter leaves before the colophon cannot be spelled,
+        because ॥ has no phonetic value and neither engine here accepts SSML.
+        Splitting also keeps the mark out of the tokenizer, where some engines
+        read it aloud as a word.
+        """
+        if shloka_corpus.DOUBLE_DANDA not in text:
+            return self.tts.synthesize(text)
+        return synthesize_with_pauses(
+            self.tts.synthesize, text,
+            verse_pause_s=self.verse_pause_s, line_pause_s=self.line_pause_s)
 
     @contextmanager
     def _tts_stage(self):
@@ -526,14 +608,23 @@ class Orchestrator:
         return english
 
     def _watch_playback(self) -> None:
+        started = time.monotonic()
         time.sleep(0.05)
         while self.robot.speaker_busy() and not self._stop.is_set():
             time.sleep(0.05)
+        # How long the mic was routed away from the segmenter. Ordinary replies
+        # are about a second; a recited verse is ten, and anything said into
+        # that window is gone. When someone reports "I asked and it ignored me",
+        # this is the number that says whether they were talking over it.
+        self.logger.debug("playback done after %.1fs (mic was not listening)",
+                          time.monotonic() - started)
         # Discard whatever the mic captured during playback before resuming
         # listening — with mic_source="built_in" there's no echo cancellation,
         # so without this the robot's own voice gets fed back in as if it
-        # were the next user utterance.
-        if hasattr(self.robot, "flush_mic"):
+        # were the next user utterance. Unless the wake word cut playback off:
+        # then the buffer holds the user mid-sentence, not an echo, and the
+        # flush would delete the very turn the barge-in was asking for.
+        if not self._barge_in.is_set() and hasattr(self.robot, "flush_mic"):
             self.robot.flush_mic()
         self.events.put(Event("playback_done"))
 

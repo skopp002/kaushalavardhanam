@@ -25,6 +25,7 @@ Two engines, selected by ``models.tts.engine`` in config.yaml:
 from __future__ import annotations
 
 import logging
+import re
 
 import numpy as np
 
@@ -35,6 +36,12 @@ DEFAULT_VOICE = (
     "recording with no background noise."
 )
 FALLBACK_MODEL = "facebook/mms-tts-hin"
+
+# Danda pauses, in seconds of real silence (see synthesize_with_pauses).
+VERSE_PAUSE_S = 0.8    # ॥ — closes a verse, or separates it from its colophon
+LINE_PAUSE_S = 0.35    # । — separates the halves of a verse, or two sentences
+
+_DANDA = re.compile(r"\s*([\u0964\u0965])\s*")   # । and ॥
 
 
 class SanskritTTS:
@@ -134,3 +141,73 @@ class SanskritTTS:
             wav = self._vits(**inputs).waveform
         wav = wav.squeeze().cpu().numpy().astype(np.float32)
         return wav, int(self._vits.config.sampling_rate)
+
+
+# --------------------------------------------------- danda-timed synthesis
+
+def _speakable(chunk: str) -> bool:
+    """Does this chunk contain anything an engine can voice?
+
+    Not cosmetic. facebook/mms-tts-hin drops punctuation at the tokenizer —
+    "।" and "॥" both tokenize to ZERO tokens — and a zero-length sequence
+    crashes the VITS forward pass with "narrow(): length must be non-negative".
+    A chunk of nothing but punctuation between two dandas would therefore take
+    down the whole recitation, so it is dropped here instead.
+
+    (That same measurement is why this module exists: the mark being dropped
+    means the engine will never read ॥ aloud as a word — and equally that it
+    leaves no pause at all where a reciter needs one.)
+    """
+    return any(ch.isalpha() for ch in chunk)
+
+
+def _split_on_dandas(text: str) -> list[tuple[str, str]]:
+    """[(chunk, terminating mark)] — the mark is "" for a chunk with none."""
+    segments: list[tuple[str, str]] = []
+    pos = 0
+    for match in _DANDA.finditer(text):
+        chunk = text[pos:match.start()].strip()
+        if _speakable(chunk):
+            segments.append((chunk, match.group(1)))
+        pos = match.end()
+    tail = text[pos:].strip()
+    if _speakable(tail):
+        segments.append((tail, ""))
+    return segments
+
+
+def synthesize_with_pauses(synthesize, text: str,
+                           verse_pause_s: float = VERSE_PAUSE_S,
+                           line_pause_s: float = LINE_PAUSE_S
+                           ) -> tuple[np.ndarray, int]:
+    """Synthesize ``text``, turning its dandas into measured silence.
+
+    ॥ has no phonetic value, so neither engine can voice it — left in the
+    prompt it is at best ignored and at worst read aloud as a word. The pause a
+    listener expects there has to be made, not spelled. Neither VITS nor
+    Parler-TTS accepts SSML, so it is made at the waveform: each chunk between
+    dandas is synthesized on its own and the pieces are joined with zeros.
+
+    ``synthesize`` is any callable returning (waveform, samplerate) — the
+    method off SanskritTTS in production, a fake in tests.
+
+    Each chunk costs a synthesis call, so callers apply this only where there
+    is a pause worth making: the orchestrator gates it on ॥, which appears in
+    recited verse and nowhere else. A string that splits into one chunk is
+    passed straight through, danda included and no trailing silence.
+    """
+    segments = _split_on_dandas(text)
+    if len(segments) <= 1:
+        return synthesize(text)
+
+    gaps = {"\u0964": line_pause_s, "\u0965": verse_pause_s}
+    pieces: list[np.ndarray] = []
+    samplerate = 0
+    for index, (chunk, mark) in enumerate(segments):
+        wav, sr = synthesize(chunk)
+        samplerate = samplerate or int(sr)
+        pieces.append(np.asarray(wav, dtype=np.float32).reshape(-1))
+        if index < len(segments) - 1:   # no silence after the final mark
+            gap = gaps.get(mark, line_pause_s)
+            pieces.append(np.zeros(int(gap * samplerate), dtype=np.float32))
+    return np.concatenate(pieces), samplerate

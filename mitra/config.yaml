@@ -99,6 +99,18 @@ session:
 lexicon:
   db_path: "data/lexicon.db"
 
+# "Recite a shloka" (src/lexicon/shlokas.py). A deterministic path: the verse
+# is read from this corpus, never generated — an 8B model asked for scripture
+# produces something verse-shaped with a confident wrong attribution. Absent
+# corpus == feature absent; the request then reaches the model like any other.
+shlokas:
+  path: "data/shlokas.json" # JSON array or JSONL; verse_text + attribution
+  # Silence at the dandas, in seconds — ॥ and । have no phonetic value, and
+  # neither TTS engine here accepts SSML, so the pause is cut into the
+  # waveform between separately-synthesized chunks (speech/tts.py).
+  verse_pause_s: 0.8 # ॥ — verse end, and verse → colophon
+  line_pause_s: 0.35 # । — between the halves of a verse
+
 # Morphology-backed checks over every reply (DESIGN §5). The Devanagari ratio
 # in validator.py cannot see Hindi written in Devanagari — खेलानि, आज, घरे and
 # मक्खनम् all scored 1.00 and were spoken — and cannot see invented verb forms

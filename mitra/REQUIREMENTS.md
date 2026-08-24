@@ -1,10 +1,12 @@
 # Mitra — Sanskrit-Speaking Interactive Robot on Reachy Mini
 
-**Status:** Requirements | **Version:** 1.6 (2026-08-22) | **Predecessor:** earlier `mitra/` design study (Cohort 3, in git history at `40639db`)
+**Status:** Requirements | **Version:** 1.7 (2026-08-23) | **Predecessor:** earlier `mitra/` design study (Cohort 3, in git history at `40639db`)
 
 Mitra (मित्रम्, "friend") is an interactive desktop robot built on the **Reachy Mini Lite**. It wakes when someone says **"mitra"**, recognizes objects shown to its camera and names them in Sanskrit, and holds simple conversations — understanding English, Kannada, or Sanskrit, but always replying in Sanskrit.
 
 **v1.1 change:** inference is **local-first with open-source models** on the host Mac. Cloud APIs are an optional, config-gated fallback that is disabled by default — the robot must be fully functional with no internet access after models are downloaded.
+
+**v1.7 change:** New **FR-3.9 shloka recitation** — asked for a verse, Mitra recites one from a curated corpus rather than generating it, with its source named. Two things this requirement is really about: an 8B model asked for scripture invents metre-adjacent lines under a confident wrong attribution, and the reply-side gates that make ordinary conversation safe (one sentence, everyday-vocabulary whitelist) are exactly wrong for epic Sanskrit. New **FR-4.5** — Devanagari verse punctuation is realized as timed silence, since ॥ has no phonetic value and the TTS engines here accept no SSML.
 
 **v1.6 change:** FR-3.5 promoted from a word blocklist to a **morphological whitelist**. Three sessions of logged replies showed the blocklist losing the race it cannot win: every new Hindi noun the model reached for needed a new entry, and it said nothing at all about invented forms like करोष्यसि or कुरुमि, which are words in no language. Output is now checked against a 30 M-form Sanskrit lexicon — every word must be an attested form, must be on Mitra's vocabulary list, and must agree with its subject in person. New FR-3.8 states the vocabulary boundary explicitly, and FR-7.2's "English glosses for the operator" is now implemented rather than aspirational.
 
@@ -91,6 +93,7 @@ Mitra (मित्रम्, "friend") is an interactive desktop robot built on
 - FR-3.6 A **morphological pass** (DESIGN §5) additionally requires every word of a reply to be an attested Sanskrit form, to be within Mitra's vocabulary (FR-3.8), and to agree with its subject in person. The retry names the offending words — a generic "answer in Sanskrit" returns the same sentence. Missing morphology data disables the pass with a warning; it never blocks startup or speech (FR-6.4).
 - FR-3.8 **Bounded vocabulary.** Mitra speaks from a fixed everyday word list (a beginner's ~500 words, the closed-class core, the seed lexicon, and the phrasebook corpus it is steered by) rather than from whatever the model produces. This is what makes "no non-Sanskrit words" enforceable: the failures in practice — आज, घरे, खेलानि — are real Sanskrit forms of unrelated words, invisible to any check that asks only whether a word exists. Words outside the list are reported with the reply that used them, so the list grows from evidence.
 - FR-3.6 Configurable "explain mode" (off by default): after the Sanskrit reply, optionally append an English gloss in text logs only — never spoken.
+- FR-3.9 **Shloka recitation.** Asked to recite a shloka (in English, Sanskrit, or Kannada), Mitra speaks a verse drawn from a curated corpus of classical Sanskrit — never one it generated — and names its source. The verse is quoted verbatim and bypasses FR-3.4's one-sentence limit and FR-3.6's vocabulary check, both of which are calibrated for generated everyday speech and would mangle or reject attested epic Sanskrit. Verses are not repeated within a session. No corpus configured == feature absent: the request is handled as an ordinary turn, where "I do not know" is the honest answer.
 - FR-3.7 The agent retains a bounded window of recent exchanges (`agent.max_history_turns`, default 4) within a session. Unbounded history lets the model imitate its own earlier output more strongly than the few-shot block, so one bad phrasing repeats for the rest of the session; a window lets it age out. Complements FR-3.3, which clears context between sessions.
 
 ### FR-4 Speech Pipeline
@@ -98,6 +101,7 @@ Mitra (मित्रम्, "friend") is an interactive desktop robot built on
 - FR-4.2 **ASR:** local Whisper large-v3 (via whisper.cpp or mlx-whisper for Metal acceleration) covers English and Kannada; Sanskrit uses a Sanskrit fine-tune (Whisper-Sanskrit transfer-learning checkpoints / AI4Bharat IndicWhisper lineage) run via HF Transformers on MPS. Sanskrit ASR is **experimental** — see Risks (§9).
 - FR-4.3 **TTS:** **AI4Bharat Indic Parler-TTS** — Sanskrit is one of its 21 supported languages with the highest native-speaker evaluation score (99.79) among them. Runs on MPS; one fixed voice chosen for warmth/clarity. Fallback if MPS latency is unacceptable: AI4Bharat **Indic-TTS** (VITS-based, lighter, also supports Sanskrit).
 - FR-4.4 All spoken output plays through the robot's speaker; all input comes from the robot's microphones (not the laptop's).
+- FR-4.5 **Verse pacing.** The Devanagari dandas — `।` between the halves of a verse, `॥` closing it and separating it from its colophon — are realized as **timed silence** (defaults 0.35 s and 0.8 s, `shlokas.line_pause_s` / `shlokas.verse_pause_s`), not passed to the engine as text. Neither mark has phonetic value and neither engine here accepts SSML, so the pause has to be cut into the waveform between separately-synthesized chunks. Measured on `facebook/mms-tts-hin`, both marks tokenize to zero tokens: the engine cannot read them aloud, and equally leaves no gap at all without this.
 
 ### FR-5 Motion (Minimal)
 - FR-5.1 Wake acknowledgment: single nod via the `reachy-mini` SDK.

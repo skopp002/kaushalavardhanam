@@ -1,6 +1,8 @@
 # Mitra — Design Document
 
-**Status:** Design | **Version:** 1.4 (2026-08-22) | **Requirements:** [REQUIREMENTS.md](REQUIREMENTS.md) v1.5
+**Status:** Design | **Version:** 1.5 (2026-08-23) | **Requirements:** [REQUIREMENTS.md](REQUIREMENTS.md) v1.7
+
+**v1.5 change:** §1.4/§4 — **shloka recitation** as a fourth deterministic path. Asked for a verse, Mitra reads one from a 955-verse corpus (`lexicon/shlokas.py`) and never generates it: the model produces verse-shaped text with a confident wrong attribution, and the reply-side gates meant for one-sentence conversation are the wrong instrument for Vyāsa. §5 — the dandas of a recitation become **measured silence** in the waveform (`speech/tts.py`), because ॥ has no phonetic value and neither TTS engine accepts SSML.
 
 **v1.4 change:** §5 — morphology-backed output checks (`mitra.sanskrit`, vidyut): a reply's words must be attested Sanskrit forms, must be on Mitra's vocabulary list, and must agree with their subject in person. This replaces script-only validation as the primary accuracy gate for *language* (the Devanagari ratio cannot see Hindi written in Devanagari). §6 — Cologne dictionaries (Monier-Williams, Apte) behind the lexicon review CLI. §5 — a debug English gloss of every spoken line (FR-7.2).
 
@@ -105,6 +107,7 @@ The primary model is **Qwen3-VL 8B Instruct**, chosen over Gemma 3 12B precisely
 
 - The **model invokes `capture_image()` itself** when the user asks about an object — the returned frame flows back into the same multimodal turn, and Qwen3-VL answers from the image. A config flag (`agent.deterministic_vision: true|false`) keeps the v1.0 orchestrator-mediated intent-check path available as a reliability fallback and for A/B testing.
 - Two calls stay **deterministic regardless of model**: `nod()` fires on the wake event, and every reply is routed through the validator and then `speak_sanskrit()` by the orchestrator — a small local model is never trusted to decide *whether* to validate or speak.
+- **Recitation is deterministic too, and for a different reason.** Asked for a shloka, the orchestrator answers from the verse corpus and never consults the model at all (§4). The others guard against a model that answers *badly*; this one guards against a model that answers *plausibly*. An 8B produces something verse-shaped, in metre-adjacent Sanskrit, over a colophon naming a parvan it did not come from — and a child would learn it as scripture. The corpus is quoted verbatim; there is nothing here for the model to add.
 - The Strands `Agent` owns the conversation loop, message history, and provider abstraction.
 
 If the Phase 3 bake-off selects Gemma 3 instead, the same `@tool` definitions keep working via the deterministic path — the tool interface is model-agnostic.
@@ -152,6 +155,7 @@ mitra/
 │   │   ├── prompts.py           # system prompt, few-shot exchanges, vision prompt
 │   │   └── validator.py         # Devanagari/length validation + retry (§5)
 │   ├── lexicon/store.py         # SQLite object-name cache (§6)
+│   ├── lexicon/shlokas.py       # verse corpus + "recite a shloka" detection (§4)
 │   ├── lexicon/vocabulary.py    # the words Mitra may say — lemma whitelist (§5)
 │   ├── lexicon/dictionary.py    # Cologne MW/Apte lookups for review (§6)
 │   ├── sanskrit/analyzer.py     # vidyut kosha: attestation + morphology (§5)
@@ -183,6 +187,8 @@ Single-threaded core with two daemon threads: the always-on wake-word listener a
 
 **Vision turn:** same until the model (or, with `deterministic_vision`, the intent check) triggers `capture_image()` → **lexicon lookup first**: if the recognized object (Qwen3-VL asked for an English identification + Sanskrit name in one JSON response) is already in the verified lexicon, the cached Sanskrit name replaces the generated one → reply assembled (*एतत् … अस्ति*) → validator → spoken. New objects are written to the lexicon as `unverified` for later human review.
 
+**Recitation turn:** transcript mentions a shloka (`श्लोक` / romanised `shlok…` / Kannada `ಶ್ಲೋಕ`, or an English "recite a verse") → orchestrator draws a verse from `data/shlokas.json`, avoiding the last 20 → the verse is closed with ॥ and its colophon appended → spoken **without** the model, the sentence limit, or the morphology checks. The corpus is 955 verses across 20 works (Mahābhārata, Rāmāyaṇa, the kāvyas, Advaita prakaraṇas), each carrying its own attribution; the colophons already open with **इति** ("thus, in …"), so nothing is inserted to join verse to source. No corpus configured == feature absent: the request reaches the model like any other turn, and the honest "I cannot" is the right answer when there is nothing to recite.
+
 ## 5. Prompting & Output Validation
 
 - **System prompt** (in `prompts.py`): persona (friendly Sanskrit-speaking robot friend), hard rules (reply only in Sanskrit/Devanagari, **one** short sentence with no reciprocal question, Sanskrit not Hindi vocabulary, simple laukika register, no sandhi-heavy constructions), followed by ~8 **few-shot exchanges** covering greetings, object naming, simple Q&A, and graceful "I don't know" — few-shot steering matters far more for a 12B local model than for frontier models.
@@ -197,6 +203,8 @@ Single-threaded core with two daemon threads: the always-on wake-word listener a
   | `agreement` | subject and verb disagreeing in person — भवान् … पठसि, अहं … चलन्ति, त्वम् … अस्मि | 0/20; 0.7 % on the phrasebook |
 
   Both false-positive columns matter: a rejected reply costs a retry and can end in the safe phrase, so `scripts/eval_grammar.py` scores every change against 924 human-authored sentences before it ships. The whitelist is stored as **lemmas**, so one entry covers a paradigm (क्रीडति admits क्रीडामि, क्रीडिष्यामि), and it is built from stem readings while membership is tested against all readings — the asymmetry is what stops आज entering through अजा's shared root.
+
+- **Recited verse bypasses all of the above** and takes a different path to the speaker. `speech/tts.synthesize_with_pauses()` splits the line at its dandas, synthesizes each chunk separately, and joins them with real silence — **0.35 s** at `।` (between the halves of a verse) and **0.8 s** at `॥` (verse end, and verse → colophon). Both marks have zero phonetic value and neither engine here takes SSML, so a pause can only be *made*, not spelled. Measured on `facebook/mms-tts-hin`: `।` and `॥` each tokenize to **zero tokens**, which is good news and bad news — the engine will never read the mark aloud as a word, and it leaves no gap whatsoever where a reciter needs one. (Zero tokens also crashes the VITS forward pass, so a chunk with no letters in it is dropped before synthesis.) The split is gated on `॥`, which appears in recitation and nowhere else Mitra speaks, so ordinary replies keep their single synthesis call.
 
 ## 6. Lexicon Store
 

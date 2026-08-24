@@ -31,6 +31,45 @@ def test_utterance_flows_to_spoken_reply(make_orchestrator, fake_tts):
     assert orch.state == State.LISTENING
 
 
+def test_shloka_request_bypasses_the_model(make_orchestrator, fake_tts):
+    """Recitation is deterministic (DESIGN §1.4): the corpus answers, not Qwen."""
+    from mitra.lexicon.shlokas import Shlokas
+
+    class OneVerse(Shlokas):
+        def __init__(self):
+            self._rows = [{
+                "source_slug": "mahabharatam", "verse_id": "6.70.36",
+                "verse_text": "पाण्डवानां कुरूणां च । ते सेने ययतुः स्वं निवेशनम्",
+                "attribution": "इति महाभारते भीष्मपर्वणि॥",
+            }]
+            self._recent = []
+
+        def pick(self):
+            return self._rows[0]
+
+        def reset(self):
+            pass
+
+    orch, agent = make_orchestrator(shlokas=OneVerse())
+    orch.state = State.LISTENING
+    orch.handle_event(Event("utterance", "Recite a shloka"))
+
+    assert agent.calls == []                       # the model was never asked
+    assert orch.state == State.SPEAKING
+    # Spoken in chunks so the dandas can become silence, ending on the colophon.
+    assert fake_tts.spoken[0] == "पाण्डवानां कुरूणां च"
+    assert fake_tts.spoken[-1] == "इति महाभारते भीष्मपर्वणि"
+
+
+def test_shloka_request_falls_through_without_a_corpus(make_orchestrator, fake_tts):
+    """No corpus == feature absent: the model answers, as it did before."""
+    orch, agent = make_orchestrator(replies=[SA_REPLY])
+    orch.state = State.LISTENING
+    orch.handle_event(Event("utterance", "Recite a shloka"))
+    assert len(agent.calls) == 1
+    assert fake_tts.spoken == [SA_REPLY]
+
+
 def test_invalid_reply_retries_with_corrective_suffix(make_orchestrator, fake_tts):
     orch, agent = make_orchestrator(replies=[EN_REPLY, SA_REPLY])
     orch.state = State.LISTENING
@@ -95,6 +134,60 @@ def test_barge_in_stops_playback(make_orchestrator, fake_robot):
     orch.handle_event(Event("wake"))
     assert fake_robot.stops == 1
     assert orch.state == State.LISTENING
+
+
+class _CountingWake:
+    """Stands in for the wake detector: only reset() is exercised here."""
+
+    def __init__(self):
+        self.resets = 0
+
+    def process(self, chunk):
+        return False
+
+    def reset(self):
+        self.resets += 1
+
+
+def test_leaving_speaking_resets_the_wake_detector(make_orchestrator, fake_robot):
+    """Its energy segmenter is only fed while asleep or speaking, so a state
+    change mid-window strands it inside an utterance made of Mitra's own voice."""
+    wake = _CountingWake()
+    orch, _ = make_orchestrator(wake=wake)
+    orch.state = State.SPEAKING
+    orch.handle_event(Event("playback_done"))
+    assert orch.state == State.LISTENING
+    assert wake.resets == 1
+
+
+def test_playback_end_flushes_the_echo(make_orchestrator, fake_robot):
+    """The ordinary case: the buffer holds the robot's own voice, so drop it."""
+    orch, _ = make_orchestrator()
+    orch._watch_playback()
+    assert fake_robot.flushes == 1
+
+
+def test_barge_in_keeps_what_the_user_is_saying(make_orchestrator, fake_robot):
+    """After the wake word cuts playback, the mic buffer is the user mid-
+    sentence — flushing it deletes the turn the barge-in was asking for."""
+    orch, _ = make_orchestrator()
+    fake_robot.hold_playback = True
+    orch.state = State.SPEAKING
+    orch.handle_event(Event("wake"))          # barge-in
+    orch._watch_playback()                    # the watcher thread, now unblocked
+    assert fake_robot.flushes == 0
+
+
+def test_the_next_reply_re_arms_the_flush(make_orchestrator, fake_robot):
+    """The barge-in flag is per-playback, not sticky for the rest of the run."""
+    orch, _ = make_orchestrator()
+    fake_robot.hold_playback = True
+    orch.state = State.SPEAKING
+    orch.handle_event(Event("wake"))
+    assert orch._barge_in.is_set()
+    fake_robot.hold_playback = False
+    orch._speak("नमस्ते")                      # a new line clears the flag
+    assert not orch._barge_in.is_set()
 
 
 def test_agent_exception_apologizes_and_keeps_session(make_orchestrator, fake_tts):

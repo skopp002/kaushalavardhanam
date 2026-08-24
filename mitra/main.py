@@ -137,6 +137,16 @@ def check(config: dict) -> int:
     else:
         print(f"phrasebook: MISSING at {pb_path} — replies will be ungrounded.\n"
               f"  build it: python3 scripts/build_phrasebook.py data/daily.pdf")
+
+    from mitra.lexicon.shlokas import Shlokas
+
+    sl_path = config.get("shlokas", {}).get("path", "data/shlokas.json")
+    shlokas = Shlokas(sl_path)
+    if shlokas.count():
+        print(f"shlokas: {shlokas.count()} verses ({sl_path})")
+    else:
+        print(f"shlokas: MISSING at {sl_path} — \"recite a shloka\" falls "
+              f"through to the model.")
     return 0
 
 
@@ -178,8 +188,10 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     from mitra.audio.vad import make_segmenter
     from mitra.audio.wake import make_wake_detector
     from mitra.lexicon.phrasebook import Phrasebook
+    from mitra.lexicon.shlokas import Shlokas
     from mitra.lexicon.store import LexiconStore
     from mitra.orchestrator import Orchestrator
+    from mitra.speech import tts as tts_module
     from mitra.speech.tts import SanskritTTS
 
     models = config["models"]
@@ -233,6 +245,15 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     if not phrasebook.count():
         logger.warning("phrasebook empty — replies will be ungrounded. Build it "
                        "with: python3 scripts/build_phrasebook.py data/daily.pdf")
+
+    # Verse corpus for "recite a shloka". Loaded here for the same reason as
+    # the phrasebook: a missing file should be one warning at startup, not a
+    # surprise on the turn a child asks for a shloka.
+    shloka_cfg = config.get("shlokas", {})
+    shlokas = Shlokas(shloka_cfg.get("path", "data/shlokas.json"))
+    if not shlokas.count():
+        logger.warning("shloka corpus empty — \"recite a shloka\" will be "
+                       "answered by the model instead of from the corpus")
 
     # Connect to the robot ONLY after all model warmups: opening the daemon
     # connection starts the microphone pipeline, and the multi-GB model loads
@@ -302,6 +323,7 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     orchestrator = Orchestrator(
         robot=robot, agent=agent, tts=tts, lexicon=lexicon,
         wake=wake, segmenter=segmenter, asr=asr, phrasebook=phrasebook,
+        shlokas=shlokas,
         turn_logger=TurnLogger(config["logging"]["dir"], logger),
         glosser=glosser,
         grammar_checker=grammar_checker,
@@ -310,6 +332,8 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
         silence_timeout_s=config["session"]["silence_timeout_s"],
         max_reply_chars=config["session"]["max_reply_chars"],
         max_sentences=config["session"].get("max_sentences", 1),
+        verse_pause_s=shloka_cfg.get("verse_pause_s", tts_module.VERSE_PAUSE_S),
+        line_pause_s=shloka_cfg.get("line_pause_s", tts_module.LINE_PAUSE_S),
         fallback_agent_factory=fallback_factory,
     )
     try:
