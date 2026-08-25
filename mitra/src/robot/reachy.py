@@ -21,6 +21,36 @@ from mitra.audio import resample
 _PLAYBACK_CHUNK_S = 0.25  # push audio in small chunks so barge-in can stop it
 _HOST_OUTPUT_SR = 22050   # used when playing through the host sound card
 
+# How much audio the host sound card is allowed to hold ahead of the speaker.
+#
+# This is buffer depth, NOT turn latency: it delays the first sample by up to
+# 200 ms and nothing else — ASR, the model and TTS are untouched, and the §8
+# budget is unaffected.
+#
+# PortAudio's default here is the device's "high" latency, ~35 ms on this class
+# of Linux box. That is too thin for the way this path actually runs: the
+# built-in mic's InputStream (`_start_built_in_mic`) is never stopped while
+# Mitra speaks, so output and input share the ALSA `default` device full
+# duplex, with Whisper and VITS on 8 torch threads competing for the same
+# cores. The output callback misses its slot, ALSA finds the ring buffer empty,
+# and prints
+#
+#     ALSA lib pcm.c:8568:(snd_pcm_recover) underrun occurred
+#
+# once per starved period — dozens per utterance, each one a real gap in the
+# speech. Measured on that full-duplex setup, 3 s of audio at a time:
+# default ~1.3 underruns per run, 0.05 s ~8, 0.1 s ~3, 0.2 s zero across every
+# run. Hence 200 ms; it is the first value with headroom to spare rather than
+# the smallest one that happened to pass.
+#
+# The cost is paid at barge-in: sd.stop() calls Pa_StopStream, which drains
+# what is already queued rather than discarding it, so an interruption now
+# takes up to 200 ms longer to fall silent. That is below the threshold where
+# a child would read the robot as "not listening", and it is the right side of
+# the trade — a stutter in every reply is worse than a beat of overhang in the
+# rare interrupted one.
+_HOST_OUTPUT_LATENCY_S = 0.2
+
 
 class ReachyRobot:
     """Connects to the reachy-mini daemon (real robot or --sim)."""
@@ -236,7 +266,8 @@ class ReachyRobot:
         try:
             import sounddevice as sd
 
-            sd.play(np.asarray(wav, dtype=np.float32), self._out_sr)
+            sd.play(np.asarray(wav, dtype=np.float32), self._out_sr,
+                    latency=_HOST_OUTPUT_LATENCY_S)
             while sd.get_stream().active:
                 if self._stop_playback.is_set():
                     sd.stop()

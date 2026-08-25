@@ -9,8 +9,8 @@ logs/
 # data/* rather than data/ so the negation below can take effect: git will
 # not re-include a file whose parent DIRECTORY is excluded.
 data/*
-# ...except the verse corpus: public-domain texts (epics, kāvya, prakaraṇa
-# works), and without it a fresh clone cannot recite. The phrasebook stays
+# ...except the verse corpus: public-domain texts (nīti and kāvya), and
+# without it a fresh clone cannot recite. The phrasebook stays
 # ignored — that one is copyrighted (see lexicon/phrasebook.py).
 !data/shlokas.json
 # ...and the record of what the corpus filter removed and why, which is the

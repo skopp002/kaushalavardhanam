@@ -12,24 +12,25 @@ orchestrator (DESIGN §1.4), next to the wake nod and the unintelligible-input
 refusal: the model is not consulted, and the reply-side checks are bypassed
 because they are the wrong instrument here. ``max_sentences: 1`` would cut the
 verse at its internal danda, and the vocabulary check rejects epic Sanskrit
-wholesale — correct for generated conversation, nonsense for Vyāsa. (The
-220-char limit happens to clear this corpus, whose longest formatted verse is
-160; a longer text would not, and that is one more reason not to route
-recitation through a gate meant for one-sentence replies.)
+wholesale — correct for generated conversation, nonsense for Bhartṛhari. (The
+220-char limit does not clear this corpus at all: three of its 500 verses run
+past it, the longest to 237, because a śārdūlavikrīḍita line is four times the
+length of an anuṣṭubh half. Which is the point — a gate sized for one spoken
+sentence has nothing useful to say about a verse.)
 
 Corpus shape — a JSON array (or JSONL, one object per line) of:
 
-    {"source": "mahAbhAratam", "source_slug": "mahabharatam",
-     "verse_id": "6.70.36", "verse_number": 36,
-     "verse_text": "पाण्डवानां कुरूणां च ... ययतुः स्वं निवेशनम्",
-     "attribution": "इति महाभारते भीष्मपर्वणि॥",
-     "attribution_iast": "iti mahābhārate bhīṣmaparvaṇi"}
+    {"source": "nItizatakam", "source_slug": "nitishatakam",
+     "verse_id": "85", "verse_number": 85,
+     "verse_text": "आलस्यं हि मनुष्याणां ... कुर्वाणो नावसीदति",
+     "attribution": "इति भर्तृहरेः नीतिशतके॥",
+     "attribution_iast": "iti bhartṛhareḥ nītiśatake"}
 
 ``words`` is accepted and ignored. Only ``verse_text`` and ``attribution`` are
 load-bearing.
 
 The two are joined by इति, the quotative particle that already opens every
-colophon ("thus, in the Bhīṣma-parvan of the Mahābhārata") — no connector is
+colophon ("thus, in the Nītiśataka of Bhartṛhari") — no connector is
 added, because the corpus ships with the connector built in. What IS added is
 the closing ॥ that the verse text omits: the single danda inside a shloka
 separates its halves, the double danda closes the whole thing, and that mark is
@@ -59,15 +60,16 @@ DOUBLE_DANDA = "॥"
 
 # Rows the corpus builder left with editorial apparatus in the verse itself —
 # "व्ययं कुर्वन्(र्यात्?)" is an editor asking a question about a manuscript
-# reading, not something to recite. No row in the present 629-verse corpus
-# trips it — the two that did are not in it any more — but the guard stays:
+# reading, not something to recite. No row in the present 500-verse corpus
+# trips it — earlier builds had rows that did — but the guard stays:
 # it is cheap, it is the next corpus build it protects, and the failure it
 # prevents (the robot solemnly reciting a parenthesis) is not cheap.
 _APPARATUS = re.compile(r"[()\[\]?*]|[A-Za-z]")
 
-# Trailing terminators are stripped before the closing ॥ is appended: 15 of the
-# 629 rows already end in a single danda, and "... तथा। ॥" would read as a
-# half-verse break immediately followed by a full one.
+# Trailing terminators are stripped before the closing ॥ is appended. No row in
+# the present corpus ends in one, but earlier builds carried rows that did, and
+# "... तथा। ॥" would read as a half-verse break immediately followed by a full
+# one.
 _TRAILING_MARKS = " \t।॥"
 
 
