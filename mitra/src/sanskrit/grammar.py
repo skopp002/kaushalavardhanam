@@ -62,18 +62,27 @@ class Finding:
     words: list[str] = field(default_factory=list)
 
 
-def check(text: str, analyzer, vocabulary=None) -> list[Finding]:
-    """Every problem found in ``text``; [] when the checks cannot run."""
+def check(text: str, analyzer, vocabulary=None, allow=None) -> list[Finding]:
+    """Every problem found in ``text``; [] when the checks cannot run.
+
+    ``allow(word)`` exempts a word from the two lexical checks. The caller
+    that uses it is the orchestrator, for the one class of word that cannot
+    be on any list written in advance: the name of the person Mitra is
+    talking to (``agent/names.py``). Agreement is unaffected — a name is not
+    a verb.
+    """
     if analyzer is None or not analyzer.available:
         return []
     findings: list[Finding] = []
+    allowed = allow or (lambda word: False)
 
     # The vocabulary vouches for one-syllable parts of a split word; see
     # Analyzer.is_attested for why that guard has to exist.
     allow_part = vocabulary.short_ok if vocabulary is not None else None
     unattested = [w for w in analyzer.words(text)
                   if not analyzer.is_attested(w, allow_part)
-                  and not (vocabulary and vocabulary.contains(w))]
+                  and not (vocabulary and vocabulary.contains(w))
+                  and not allowed(w)]
     if unattested:
         findings.append(Finding(
             "unattested",
@@ -81,7 +90,8 @@ def check(text: str, analyzer, vocabulary=None) -> list[Finding]:
             list(dict.fromkeys(unattested))))
 
     if vocabulary is not None and vocabulary.available:
-        outside = [w for w in vocabulary.unknown(text) if w not in unattested]
+        outside = [w for w in vocabulary.unknown(text)
+                   if w not in unattested and not allowed(w)]
         if outside:
             findings.append(Finding(
                 "vocabulary",
@@ -158,10 +168,10 @@ class Checker:
         return bool(self.analyzer is not None and self.analyzer.available
                     and self.checks)
 
-    def __call__(self, text: str) -> list[Finding]:
+    def __call__(self, text: str, allow=None) -> list[Finding]:
         if not self.available:
             return []
-        return [f for f in check(text, self.analyzer, self.vocabulary)
+        return [f for f in check(text, self.analyzer, self.vocabulary, allow)
                 if f.check in self.checks]
 
     @staticmethod

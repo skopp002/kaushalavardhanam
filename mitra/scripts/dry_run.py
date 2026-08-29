@@ -111,6 +111,7 @@ def main() -> int:
     args = ap.parse_args()
 
     from mitra.agent.agent import MitraAgent
+    from mitra.agent.followups import Followups
     from mitra.agent.tools import build_tools
     from mitra.logging_subsystem import TurnLogger
     from mitra.lexicon.phrasebook import Phrasebook
@@ -154,6 +155,12 @@ def main() -> int:
     checker = mitra_main._build_grammar_checker(config, phrasebook, logger)
     shloka_cfg = config.get("shlokas", {})
     shlokas = Shlokas(shloka_cfg.get("path", str(ROOT / "data/shlokas.json")))
+    # The printed line is what a child would hear, invitation included. The
+    # eval is unaffected: turns.jsonl records the generated answer as "reply"
+    # and the appended question separately as "followup" (orchestrator.py).
+    followups = (Followups()
+                 if config.get("conversation", {}).get("follow_up", True)
+                 else None)
 
     glosser = None
     if args.gloss:
@@ -168,7 +175,8 @@ def main() -> int:
         robot=robot, agent=MitraAgent(config["models"]["llm"],
                                       build_tools(robot, tts), verbose=False),
         tts=tts, lexicon=LexiconStore(config["lexicon"]["db_path"]),
-        phrasebook=phrasebook, shlokas=shlokas, glosser=glosser,
+        phrasebook=phrasebook, shlokas=shlokas, followups=followups,
+        glosser=glosser,
         grammar_checker=checker,
         turn_logger=turn_logger, logger=logger, gestures=False,
         max_reply_chars=config["session"]["max_reply_chars"],
@@ -197,6 +205,7 @@ def main() -> int:
         label = f"{question_id}  " if question_id else ""
         print(f"\n  {label}you:   {question}")
         print(f"  {' ' * len(label)}mitra: {reply}   [{time.monotonic() - turn:.1f}s]")
+    orchestrator.flush_logs()   # the gloss worker writes the turn records
     print(f"\n{len(questions)} turns in {time.monotonic() - started:.0f}s")
     if turn_logger is not None:
         print(f"turn log: {turn_logger.path}")

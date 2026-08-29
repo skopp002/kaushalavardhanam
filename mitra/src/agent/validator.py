@@ -58,6 +58,41 @@ _HINDI_MARKERS = frozenset("""
 _HINDI_STEMS = ("मक्खन", "खेल")
 
 
+# Constructions that are wrong whatever words fill them, and have one obvious
+# right form. This is not general case government — DESIGN §5 declines that on
+# purpose, because it needs a parse and a wrong parse rejects correct Sanskrit
+# — it is a short list of shapes seen failing in live sessions, each narrow
+# enough to be certain about.
+#
+# "अहं X प्रियम् अस्मि" is the whole list so far, and it earned its place: four
+# times in one 15-turn session Mitra said अहं वानरं प्रियं अस्मि, अहं पुस्तकं
+# प्रियम् अस्मि, अहं गणितं प्रियम् अस्मि — "I am the dear monkey", "I am the
+# dear book". प्रियम् is neuter and cannot describe अहम्, so the sentence says
+# Mitra IS the thing it means to like. Every check we have waves it through:
+# every word is attested, in vocabulary, and the verb agrees.
+#
+# Matched only where प्रियम् sits directly before अस्मि. With anything between
+# them the neuter is describing that word instead, and अहं तव प्रियं मित्रम्
+# अस्मि ("I am your dear friend") is correct Sanskrit that must not be caught.
+_WRONG_CONSTRUCTIONS = (
+    (re.compile(r"अहं[^।॥?!]*प्रिय(?:म्|ं)\s+अस्मि"),
+     "अहं X प्रियम् अस्मि", "मह्यं X रोचते"),
+)
+
+
+def wrong_construction(text: str):
+    """``(what was written, what to write instead)`` for a known-bad shape.
+
+    Returns None when the reply uses none of them. The pair is what makes the
+    retry work: "answer in Sanskrit" gets the same sentence back, while being
+    handed the correct template gets मह्यं गणितं रोचते.
+    """
+    for pattern, wrong, right in _WRONG_CONSTRUCTIONS:
+        if pattern.search(text or ""):
+            return wrong, right
+    return None
+
+
 def devanagari_ratio(text: str) -> float:
     """Devanagari codepoints / all script codepoints (letters + combining marks).
 
@@ -99,4 +134,7 @@ def validate(text: str, max_chars: int = MAX_REPLY_CHARS,
     hindi = hindi_markers(text)
     if hindi:
         return False, f"Hindi, not Sanskrit ({', '.join(sorted(set(hindi)))})"
+    construction = wrong_construction(text)
+    if construction:
+        return False, f"wrong construction ({construction[0]})"
     return True, ""

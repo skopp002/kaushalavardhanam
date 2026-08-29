@@ -138,6 +138,18 @@ def check(config: dict) -> int:
         print(f"phrasebook: MISSING at {pb_path} — replies will be ungrounded.\n"
               f"  build it: python3 scripts/build_phrasebook.py data/daily.pdf")
 
+    from mitra.agent.followups import Followups
+
+    if config.get("conversation", {}).get("follow_up", True):
+        followups = Followups()
+        print(f"follow-ups: {followups.count()} verified questions + "
+              f"{followups.deepening_count()} follow-ons + "
+              f"{followups.continuation_count()} continuations "
+              f"(every reply ends with one)")
+    else:
+        print("follow-ups: off (conversation.follow_up) — replies do not "
+              "invite a next turn")
+
     from mitra.lexicon.shlokas import Shlokas
 
     sl_path = config.get("shlokas", {}).get("path", "data/shlokas.json")
@@ -166,9 +178,17 @@ def _build_grammar_checker(config: dict, phrasebook, logger):
     analyzer = Analyzer(settings.get("data_dir", "data/vidyut"), logger)
     if not analyzer.available:
         return None
-    extra: tuple[str, ...] = ()
+    # Everything Mitra says in its own voice is a word Mitra may say: the
+    # follow-up questions and the fixed phrases. Without them the checks
+    # contradict the robot — it asked "तव प्रियः पशुः कः?", the child answered,
+    # and the reply was rejected for using पशु.
+    from mitra.agent import followups as followup_list
+    from mitra.agent import prompts
+
+    extra: tuple[str, ...] = (followup_list.spoken_questions()
+                              + prompts.SPOKEN_PHRASES)
     if settings.get("ground_in_phrasebook", True) and phrasebook is not None:
-        extra = tuple(phrasebook.sentences())
+        extra += tuple(phrasebook.sentences())
     vocabulary = Vocabulary(
         analyzer, seed_path=Path(__file__).resolve().parent / "src" /
         "lexicon" / "seed_lexicon.json",
@@ -183,6 +203,7 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     logger = setup_logging(debug)
 
     from mitra.agent.agent import MitraAgent
+    from mitra.agent.followups import Followups
     from mitra.agent.tools import build_tools
     from mitra.audio.asr import Transcriber
     from mitra.audio.vad import make_segmenter
@@ -255,6 +276,15 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
         logger.warning("shloka corpus empty — \"recite a shloka\" will be "
                        "answered by the model instead of from the corpus")
 
+    # The verified follow-up questions that keep each turn conversational
+    # (FR-3.12). No model, no data files, no failure mode worth guarding — the
+    # list is a literal in the module — so this is just a flag.
+    followups = (Followups()
+                 if config.get("conversation", {}).get("follow_up", True)
+                 else None)
+    if followups is None:
+        logger.info("follow-up questions off — replies will not invite a reply")
+
     # Connect to the robot ONLY after all model warmups: opening the daemon
     # connection starts the microphone pipeline, and the multi-GB model loads
     # above starve the audio threads badly enough that GStreamer floods the
@@ -323,7 +353,7 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
     orchestrator = Orchestrator(
         robot=robot, agent=agent, tts=tts, lexicon=lexicon,
         wake=wake, segmenter=segmenter, asr=asr, phrasebook=phrasebook,
-        shlokas=shlokas,
+        shlokas=shlokas, followups=followups,
         turn_logger=TurnLogger(config["logging"]["dir"], logger),
         glosser=glosser,
         grammar_checker=grammar_checker,
@@ -342,6 +372,7 @@ def build_and_run(config: dict, robot_backend: str, debug: bool) -> int:
         pass
     finally:
         orchestrator.stop()
+        orchestrator.flush_logs()
         robot.close()
     return 0
 

@@ -1,6 +1,6 @@
 # Mitra (मित्रम्) — Sanskrit-Speaking Robot on Reachy Mini
 
-Mitra ("friend" in Sanskrit) is an interactive desktop robot built on the **Reachy Mini Lite**. Say **"mitra"** to wake it, show it any object and it names the object in Sanskrit, and converse with it — it understands English, Kannada, or Sanskrit, and replies in spoken Sanskrit — and if you ask *"explain that in English"*, it explains the exchange in English before returning to Sanskrit. All inference runs **locally** on the host Mac with open-source models; no internet is needed at runtime.
+Mitra ("friend" in Sanskrit) is an interactive desktop robot built on the **Reachy Mini Lite**. Say **"mitra"** to wake it, show it any object and it names the object in Sanskrit, and converse with it — it understands English, Kannada, or Sanskrit, replies in spoken Sanskrit, and ends every turn with a short question back, so the conversation keeps going instead of stopping at each answer — and if you ask *"explain that in English"*, it explains the exchange in English before returning to Sanskrit. All inference runs **locally** on the host Mac with open-source models; no internet is needed at runtime.
 
 **📺 Video walkthrough — setting up this repo from scratch:**
 

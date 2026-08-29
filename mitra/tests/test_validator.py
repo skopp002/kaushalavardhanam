@@ -1,3 +1,6 @@
+import pytest
+
+from mitra.agent import validator
 from mitra.agent.validator import devanagari_ratio, validate
 
 PURE_SA = "एतत् सेवफलम् अस्ति।"
@@ -98,3 +101,30 @@ def test_stem_matching_does_not_swallow_sanskrit_words():
 def test_correct_favourite_constructions_pass():
     assert validate("मम प्रियं भोजनं नवनीतम् अस्ति।")[0]
     assert validate("मह्यं गणितं रोचते।")[0]
+
+
+# ------------------------------------------------- wrong constructions (§5)
+
+@pytest.mark.parametrize("reply", [
+    "अहं वानरं प्रियं अस्मि।",      # "I am the dear monkey"
+    "अहं पुस्तकं प्रियम् अस्मि।",
+    "अहं गणितं प्रियम् अस्मि।",
+])
+def test_the_i_am_the_dear_thing_construction_is_rejected(reply):
+    """Four times in one live session, and every other check passes it."""
+    ok, reason = validator.validate(reply)
+    assert not ok and "construction" in reason
+    assert validator.wrong_construction(reply) == ("अहं X प्रियम् अस्मि",
+                                                   "मह्यं X रोचते")
+
+
+@pytest.mark.parametrize("reply", [
+    "अहं तव प्रियं मित्रम् अस्मि।",   # the neuter describes मित्रम्, not अहम्
+    "मह्यं गणितं रोचते।",            # the correct way to say it
+    "मम प्रियं भोजनं नवनीतम् अस्ति।",
+    "अहं कुशली अस्मि।",
+])
+def test_correct_sentences_are_not_caught_by_the_pattern(reply):
+    ok, _ = validator.validate(reply)
+    assert ok
+    assert validator.wrong_construction(reply) is None

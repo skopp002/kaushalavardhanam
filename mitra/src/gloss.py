@@ -18,8 +18,17 @@ for its own translation, and deliberately not a phrasebook lookup:
   would read as correct English. That defeats the only reason to log this.
 
 The translator therefore renders the reply literally, warts included, and
-runs off the speaking path (see Orchestrator._speak): the call happens after
-playback has started, so it costs log latency, never speech latency.
+runs off the speaking path AND off the run loop (Orchestrator._gloss_async):
+the call happens after playback has started, on a worker thread, so it costs
+log latency and nothing else. Inline it cost far more than latency — holding
+the run-loop thread for the length of a model call left the state machine in
+WAKING/SPEAKING, where the microphone is routed to the wake detector, so a
+user answering Mitra's question had that answer discarded as a failed wake
+match.
+
+The fixed phrases and the follow-up questions are glossed from a table rather
+than by the model, and a line made of both — the wake greeting is — needs no
+call at all.
 """
 
 from __future__ import annotations
@@ -27,7 +36,7 @@ from __future__ import annotations
 import logging
 import re
 
-from mitra.agent import prompts
+from mitra.agent import followups, prompts
 
 GLOSS_SYSTEM_PROMPT = """\
 You are a Sanskrit-to-English translation tool. The user sends one Sanskrit \
@@ -58,7 +67,18 @@ FIXED_GLOSSES = {
     prompts.APOLOGY_RETRY: "Sorry, please say that again.",
     prompts.APOLOGY_SHOW_AGAIN: "Please show me again.",
     prompts.SAFE_FALLBACK: "Sorry, I do not understand.",
+    # The follow-up questions ship with their own English (followups.py), so
+    # the half of every reply that Mitra did not generate costs nothing to
+    # log. This matters most at wake, where the whole line — greeting plus
+    # question — is fixed text and needs no model call at all.
+    **{row["question"]: row["english"] for row in followups.ROWS},
 }
+
+# Trailing dandas are not part of a phrase's identity: join_question() adds one
+# to a reply that lacks a terminator, which turned the cached "नमस्ते" into an
+# uncached "नमस्ते।" and bought a model call for a line whose English is a
+# constant.
+_TERMINATORS = " ।॥"
 
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 
@@ -91,8 +111,17 @@ class Glosser:
             # Nothing to translate: an [explain_in_english] turn already
             # answered in English, and the log line carries it verbatim.
             return None
-        if text in self._cache:
-            return self._cache[text]
+        cached = self._cached(text)
+        if cached is not None:
+            return cached
+        head, tail_en = self._known_question(text)
+        if tail_en is not None:
+            # "<generated answer> <verified question>" — translate only the half
+            # that varies and paste the known English of the other.
+            head_en = self.gloss(head) if head else None
+            english = f"{head_en} {tail_en}" if head_en else tail_en
+            self._remember(text, english)
+            return english
         if not self._enabled:
             return None
         try:
@@ -110,9 +139,29 @@ class Glosser:
         english = _first_line(raw)
         if not english:
             return None
+        self._remember(text, english)
+        return english
+
+    def _cached(self, text: str) -> str | None:
+        return (self._cache.get(text)
+                or self._cache.get(text.rstrip(_TERMINATORS)))
+
+    def _remember(self, text: str, english: str) -> None:
         if len(self._cache) < _MAX_CACHE:
             self._cache[text] = english
-        return english
+
+    @staticmethod
+    def _known_question(text: str) -> tuple[str, str | None]:
+        """Split a line into (everything else, English of its fixed question).
+
+        Returns ``(text, None)`` when the line does not end in one of the
+        verified follow-up questions.
+        """
+        for row in followups.ROWS:
+            question = row["question"]
+            if text.endswith(question) and len(text) > len(question):
+                return text[:-len(question)].strip(), row["english"]
+        return text, None
 
 
 def _first_line(raw: str) -> str:

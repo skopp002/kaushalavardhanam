@@ -29,6 +29,7 @@ GOOD = [
     "मम प्रियं भोजनं नवनीतम् अस्ति।",
     "मह्यं गणितं रोचते।",
     "अहं क्रीडामि।",
+    "अहं कन्दुकेन क्रीडामि।",
     "अहं संगीतं श्रोतुम् इच्छामि।",
     "पुनः मिलामः।",                       # orchestrator fixed phrases
     "क्षम्यताम्, पुनः वदतु।",
@@ -48,15 +49,18 @@ BAD = [
 ]
 
 
+def _seed():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[1] / "src" / "lexicon" / "seed_lexicon.json"
+
+
 @pytest.fixture(scope="module")
 def checker():
     analyzer = Analyzer()
     if not analyzer.available:
         pytest.skip("vidyut data absent — run scripts/fetch_sanskrit_data.py")
-    from pathlib import Path
-
-    seed = Path(__file__).resolve().parents[1] / "src" / "lexicon" / "seed_lexicon.json"
-    return grammar.Checker(analyzer, Vocabulary(analyzer, seed_path=seed))
+    return grammar.Checker(analyzer, Vocabulary(analyzer, seed_path=_seed()))
 
 
 @pytest.mark.parametrize("sentence", GOOD)
@@ -99,3 +103,21 @@ def test_unavailable_analyzer_checks_nothing():
     assert not analyzer.available
     assert grammar.check("अहं खेलानि करोमि।", analyzer) == []
     assert Vocabulary(analyzer).contains("मक्खनम्")   # no data, no opinions
+
+
+def test_mitra_may_say_the_words_its_own_questions_use(checker):
+    """It asked "तव प्रियः पशुः कः?", was answered, and rejected its own पशु.
+
+    The follow-up list and the fixed phrases go into the vocabulary for
+    exactly this reason (main.py), so the checks built from it must accept
+    them. Constructed here the same way the runtime does.
+    """
+    from mitra.agent import followups, prompts
+
+    spoken = followups.spoken_questions() + prompts.SPOKEN_PHRASES
+    grounded = grammar.Checker(
+        checker.analyzer,
+        Vocabulary(checker.analyzer, seed_path=_seed(), extra_texts=spoken))
+    for line in spoken:
+        findings = grounded(line)
+        assert not findings, f"{line}: {grounded.reason(findings)}"

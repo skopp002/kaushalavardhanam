@@ -68,9 +68,44 @@ class MitraAgent:
 
     def converse(self, message: str) -> str:
         """One turn: user message in, final agent text out (tools may run)."""
-        reply = str(self._agent(message)).strip()
+        try:
+            reply = str(self._agent(message)).strip()
+        except Exception as e:                 # noqa: BLE001 — narrowed below
+            if type(e).__name__ != "MaxTokensReachedException":
+                raise
+            reply = self._salvage_partial()
         self._trim_history()
         return reply
+
+    def _salvage_partial(self) -> str:
+        """Whatever the model managed to say before it ran out of room.
+
+        Ollama reports ``done_reason: length`` when generation runs into the
+        context window, and Strands turns that into an exception — which the
+        orchestrator can only answer with "say that again", discarding a reply
+        that was usually complete enough to speak. Worse, Strands leaves the
+        half-finished message in history: seen live, a truncated English
+        explanation of a verse made the NEXT reply English too, and the
+        Devanagari gate then failed it twice over.
+
+        So the partial text is taken out of history and handed back as an
+        ordinary reply. It faces the same gates as any other — truncated to
+        one sentence, validated, retried — and an unusable fragment ends where
+        it would have anyway. The exception is matched by name because
+        ``strands`` is an optional extra and must not be imported here.
+        """
+        messages = getattr(self._agent, "messages", None)
+        if not isinstance(messages, list) or not messages:
+            return ""
+        last = messages[-1]
+        if not isinstance(last, dict) or last.get("role") != "assistant":
+            return ""
+        messages.pop()
+        content = last.get("content")
+        if not isinstance(content, list):
+            return ""
+        return " ".join(block["text"] for block in content
+                        if isinstance(block, dict) and "text" in block).strip()
 
     @staticmethod
     def _is_clean_start(message) -> bool:

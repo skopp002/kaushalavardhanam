@@ -7,11 +7,13 @@ loop's thread. Two daemon helpers — the audio pump and the playback watcher �
 communicate with the core only by putting events on the queue (DESIGN §3).
 Tests drive ``handle_event`` directly with fakes; ``run()`` adds the threads.
 
-The agent may call tools itself, but four paths stay deterministic regardless
+The agent may call tools itself, but five paths stay deterministic regardless
 of model quality (DESIGN §1.4): ``nod`` fires here on wake, unintelligible
 transcripts are refused here before the model ever sees them, a request to
 recite a shloka is answered from the verse corpus without consulting the model
-at all, and every generated reply passes the validator and is spoken here.
+at all, every generated reply passes the validator and is spoken here, and the
+follow-up question that keeps the conversation going is drawn from a verified
+list rather than generated (FR-3.12).
 """
 
 from __future__ import annotations
@@ -29,7 +31,8 @@ from enum import Enum
 import numpy as np
 
 from mitra import language_detector
-from mitra.agent import prompts, validator
+from mitra.agent import followups as followup_list
+from mitra.agent import names, prompts, validator
 from mitra.agent.tools import END_SESSION_SENTINEL
 from mitra.audio import TARGET_SAMPLERATE, resample
 from mitra.lexicon import shlokas as shloka_corpus
@@ -55,6 +58,16 @@ _ASR_HALLUCINATIONS = {
 # Below this many characters a transcript carries too little signal to answer.
 _MIN_TRANSCRIPT_CHARS = 3
 
+# ...unless Mitra has just asked something, when the answer is expected to be
+# short and the outstanding question supplies the context the words lack. "no"
+# and "हा" are two characters, and refusing the answer to a question Mitra
+# itself put is the most incoherent thing it could do (FR-3.13).
+_MIN_ANSWER_CHARS = 2
+
+# Below this many words, a phrasebook lookup is matching on one word and the
+# row it finds can be about anything (see _retrieve_examples).
+_MIN_RETRIEVAL_WORDS = 3
+
 # Sentence terminators, Devanagari and Latin. Used to hold the reply to
 # ``max_sentences`` (DESIGN §1.4: the model is asked for one sentence, and this
 # enforces it whether or not it complies).
@@ -77,6 +90,19 @@ _REFERENCE_HEADER = (
 )
 
 
+# Fixed phrases that must never carry a follow-up question. Every one of them
+# is Mitra saying it did not understand, and each already asks for the same
+# thing a follow-up would: another try. Observed live, the alternative reads as
+# a robot that has stopped listening — "क्षम्यताम्, अहं न अवगच्छामि। तव गृहे के
+# सन्ति?" ("Sorry, I do not understand. Who is at your home?"). Matched by
+# value rather than by call site because these are spoken from four different
+# paths (transcript refused, agent raised, validation failed twice, tool error).
+_NO_INVITE_AFTER = frozenset({
+    prompts.APOLOGY_RETRY, prompts.APOLOGY_SHOW_AGAIN, prompts.SAFE_FALLBACK,
+    prompts.FAREWELL,
+})
+
+
 class State(str, Enum):
     ASLEEP = "ASLEEP"
     WAKING = "WAKING"
@@ -94,7 +120,7 @@ class Event:
 class Orchestrator:
     def __init__(self, *, robot, agent, tts, lexicon,
                  wake=None, segmenter=None, asr=None, phrasebook=None,
-                 shlokas=None,
+                 shlokas=None, followups=None,
                  turn_logger=None, glosser=None, grammar_checker=None,
                  logger: logging.Logger | None = None,
                  silence_timeout_s: float = 30.0,
@@ -118,6 +144,12 @@ class Orchestrator:
         # Optional: verse corpus for "recite a shloka" (lexicon/shlokas.py).
         # A deterministic path — the model is not asked to produce scripture.
         self.shlokas = shlokas
+        # Optional: the verified follow-up questions that turn an answer into
+        # an exchange (agent/followups.py, FR-3.12). Deterministic for the same
+        # reason the verses are: the model's own reciprocal questions were where
+        # its grammar failed (कथं भवतः?), which is why v1.5 removed them. Absent
+        # == feature absent: Mitra answers and waits, as it did before.
+        self.followups = followups
         self.turn_logger = turn_logger
         # Optional (debug runs only): translates every spoken line back into
         # English for the log, so an operator who does not read Devanagari can
@@ -151,6 +183,31 @@ class Orchestrator:
         self._sleep_after_speaking = False
         self._last_activity = time.monotonic()
         self._consecutive_retries = 0
+        # The follow-up question appended to the last spoken reply, if any. The
+        # model never saw it — it is added after generation — so the next turn
+        # has to carry it back in (_build_message), or the answer to it arrives
+        # with nothing to attach to.
+        self._pending_question: str | None = None
+        # Proper nouns the user has given us this session, as {spelling:
+        # consonant skeleton} (agent/names.py). The checks downstream of the
+        # model are built on a closed word list, and a name is the one word
+        # that arrives from outside it at runtime — without this, Mitra asks
+        # "तव नाम किम्?", is told, and answers "sorry, I do not understand".
+        self._heard_names: dict[str, str] = {}
+        # The verse just recited, if the last turn was a recitation. Same
+        # repair as _pending_question: the corpus answered, so the model never
+        # saw the verse, and the next turn is about a verse it does not know.
+        self._recited: tuple[str, str] | None = None
+        # Work queue for the English gloss (FR-7.2), drained by one worker
+        # started on first use. One worker, not a thread per line: the Glosser
+        # owns a single model agent, and two turns glossing at once had them
+        # calling converse() on it concurrently — which failed, and one failure
+        # disables the gloss for the whole run. Serialising also keeps
+        # turns.jsonl in turn order. Callers that need the gloss before
+        # continuing (tests) can ``_gloss_queue.join()``; nothing on the
+        # speaking path ever waits.
+        self._gloss_queue: queue.Queue = queue.Queue()
+        self._gloss_worker: threading.Thread | None = None
         # Set when the wake word cuts playback short, so the playback watcher
         # knows not to flush the mic out from under the user (see _speak).
         self._barge_in = threading.Event()
@@ -177,6 +234,18 @@ class Orchestrator:
 
     def stop(self) -> None:
         self.events.put(Event("stop"))
+
+    def flush_logs(self, timeout: float = 10.0) -> None:
+        """Wait for queued glosses and their turn records to be written.
+
+        Turn records are written by the gloss worker (FR-7.2), so a process
+        that exits the moment the last question is answered loses the tail of
+        turns.jsonl — which is exactly what the eval harness reads. Bounded:
+        a log is never worth hanging a shutdown for.
+        """
+        waiter = threading.Thread(target=self._gloss_queue.join, daemon=True)
+        waiter.start()
+        waiter.join(timeout)
 
     # ------------------------------------------------------- event dispatch
 
@@ -225,7 +294,13 @@ class Orchestrator:
         self.robot.nod()                      # deterministic (DESIGN §1.4)
         self._emotion("welcoming1")
         self._consecutive_retries = 0
-        self._speak(prompts.GREETING)         # → playback_done → LISTENING
+        # The greeting opens the conversation rather than just announcing that
+        # Mitra is awake: "नमस्ते। तव नाम किम्?" gives the child something to
+        # answer, which is the whole of FR-3.12 at the one moment there is no
+        # transcript to take a cue from.
+        greeting = self._invite(prompts.GREETING, topic="greeting")
+        self._speak(greeting)
+        self._gloss_async(greeting)
 
     def _to_listening(self) -> None:
         self.state = State.LISTENING
@@ -257,6 +332,11 @@ class Orchestrator:
         self.agent.reset()                    # context is per-session (FR-3.3)
         if self.shlokas:
             self.shlokas.reset()              # so does "don't repeat a verse"
+        if self.followups:
+            self.followups.reset()            # and "don't ask the same thing twice"
+        self._pending_question = None
+        self._recited = None
+        self._heard_names.clear()             # and who we were talking to
         if self.wake:
             self.wake.reset()
         if self.segmenter:
@@ -275,9 +355,14 @@ class Orchestrator:
         the agent, which then answers confidently — or, worse, echoes the noise
         back as if it were Sanskrit. Refusing here is the only place the
         pipeline can tell the difference.
+
+        The length bar moves with the conversation: a bare "no" carries nothing
+        on its own, and answers a question Mitra asked a moment ago.
         """
         cleaned = transcript.strip()
-        if len(cleaned) < _MIN_TRANSCRIPT_CHARS:
+        minimum = (_MIN_ANSWER_CHARS if self._pending_question
+                   else _MIN_TRANSCRIPT_CHARS)
+        if len(cleaned) < minimum:
             return "too short"
         if cleaned.lower().strip(" .!?") in _ASR_HALLUCINATIONS:
             return "known ASR hallucination"
@@ -289,8 +374,19 @@ class Orchestrator:
         return None
 
     def _retrieve_examples(self, transcript: str) -> list:
-        """Nearest everyday phrases for this turn, or [] if unavailable."""
-        if self.phrasebook is None:
+        """Nearest everyday phrases for this turn, or [] if unavailable.
+
+        A turn of one or two words gets none. Retrieval over a fragment is a
+        match on a single word, and the resolved block can be about anything:
+        "at home." — two words answering "who is at your home?" — scored 0.53
+        against *Are all well at home?*, whose answer block is सर्वं कुशलम्, and
+        the model spoke that back verbatim ("Everything is well"). Fragments
+        became common the moment Mitra started asking questions (FR-3.12), and
+        for them the context that matters is the question itself
+        (``prompts.ASKED_HEADER``), not a phrasebook row sharing one word.
+        Ungrounded is the right outcome for a turn this corpus cannot answer.
+        """
+        if self.phrasebook is None or len(transcript.split()) < _MIN_RETRIEVAL_WORDS:
             return []
         try:
             return self.phrasebook.similar(transcript, k=3)
@@ -299,7 +395,8 @@ class Orchestrator:
             return []
 
     def _build_message(self, transcript: str, lang: str, explain_en: bool) -> str:
-        """Assemble the turn message: tags, transcript, retrieved phrasing.
+        """Assemble the turn message: what Mitra asked, tags, transcript,
+        retrieved phrasing.
 
         The examples go after the transcript so the user's turn stays the most
         recent thing in the message — context that follows a question tends to
@@ -309,6 +406,19 @@ class Orchestrator:
         if explain_en:
             header += " [explain_in_english]"
         message = f"{header} {transcript}"
+
+        # Consumed, not kept: it describes the exchange that just happened, and
+        # a stale copy on the next turn would have the model answering a
+        # question two turns old.
+        if self._pending_question:
+            message = prompts.ASKED_HEADER.format(
+                question=self._pending_question) + message
+            self._pending_question = None
+        if self._recited:
+            verse, attribution = self._recited
+            message = prompts.RECITED_HEADER.format(
+                verse=verse, attribution=attribution) + message
+            self._recited = None
 
         examples = self._retrieve_examples(transcript)
         if examples:
@@ -348,10 +458,25 @@ class Orchestrator:
             return
 
         self._consecutive_retries = 0
+        self._note_names(transcript)
+        if self.followups is not None:
+            # Before anything is chosen: what the user just volunteered is not
+            # something to ask them about (FR-3.12).
+            self.followups.observe(transcript)
+
+        # A turn that asks something opens a subject, and answering it plus
+        # opening one back is conversation. A turn that only tells us something
+        # — or answers what Mitra asked — is a thread being pulled, and a new
+        # subject there drops it (FR-3.12).
+        continuing = not followup_list.asks_something(transcript)
 
         recitation = self._recite_if_asked(transcript)
         if recitation is not None:
-            self._finish_turn(recitation)
+            # Consumed like any other turn: the verse is the answer to the
+            # outstanding question, and carrying it into the next message
+            # would have the model answering a question two turns old.
+            self._pending_question = None
+            self._finish_turn(recitation, transcript=transcript, topic="shloka")
             return
 
         explain_en = bool(_EXPLAIN_IN_ENGLISH_RE.search(transcript))
@@ -368,8 +493,9 @@ class Orchestrator:
 
         if session_end:
             self._sleep_after_speaking = True
-            reply = prompts.FAREWELL
-        self._finish_turn(reply)
+            self._finish_turn(prompts.FAREWELL)
+            return
+        self._finish_turn(reply, transcript=transcript, continuing=continuing)
 
     def _recite_if_asked(self, transcript: str) -> str | None:
         """A verse from the corpus if this turn asked for one, else None.
@@ -381,8 +507,11 @@ class Orchestrator:
         Falling through to None when there is no corpus is deliberate too: the
         model will then say it cannot, which is true.
         """
-        if self.shlokas is None or not shloka_corpus.is_recitation_request(transcript):
-            if self.shlokas is not None and shloka_corpus.looks_like_a_near_miss(transcript):
+        if self.shlokas is None:
+            return None
+        if not (shloka_corpus.is_recitation_request(transcript)
+                or self._accepted_a_verse(transcript)):
+            if shloka_corpus.looks_like_a_near_miss(transcript):
                 # Not a refusal — the turn goes on to the model as usual. This
                 # is the breadcrumb for the next spelling whisper invents (it
                 # has said "schlocker"): grep the log for it and widen the
@@ -396,21 +525,112 @@ class Orchestrator:
             return None
         verse_id = f"{row.get('source_slug', '?')} {row.get('verse_id', '?')}"
         self.logger.info("reciting shloka %s", verse_id)
+        # Kept for exactly one turn (see _build_message): whatever the child
+        # says next — "what does it mean?", "say it again" — is about this.
+        self._recited = (row.get("verse_text", ""), row.get("attribution", ""))
         if self.turn_logger:
             self.turn_logger.set("shloka", verse_id)
         return shloka_corpus.format_recitation(row)
 
-    def _finish_turn(self, reply: str) -> None:
+    def _accepted_a_verse(self, transcript: str) -> bool:
+        """True when "yes" is an answer to Mitra's own offer of another verse.
+
+        A bare "आम्" means recite only because Mitra just asked whether to
+        (``followups.OFFERS_VERSE``), so the offer has to be the outstanding
+        question — otherwise every agreeable turn in the session would produce
+        a shloka. Without this the invitation is a dead end: the child says
+        yes, the model has no verse to give, and it apologizes for a question
+        Mitra itself put.
+        """
+        return (self._pending_question in followup_list.OFFERS_VERSE
+                and followup_list.is_affirmative(transcript))
+
+    # -------------------------------------------------------------- names
+
+    def _note_names(self, transcript: str) -> None:
+        """Remember the proper nouns in this turn for the rest of the session.
+
+        Session-scoped, because a child gives their name once and Mitra may
+        greet them by it several turns later (agent/names.py).
+        """
+        for name, skeleton in names.heard(transcript).items():
+            if name not in self._heard_names:
+                self._heard_names[name] = skeleton
+                self.logger.debug("name heard: %s (%s)", name, skeleton)
+
+    def _is_a_name(self, word: str) -> bool:
+        """True if a word the checks rejected is a name the user gave us."""
+        return bool(self._heard_names) and names.echoes(
+            word, self._heard_names.values())
+
+    def _finish_turn(self, reply: str, *, transcript: str = "",
+                     topic: str | None = None, continuing: bool = False) -> None:
         tl = self.turn_logger
         if tl:
+            # Logged before the invitation is appended, and the invitation
+            # logged beside it as "followup": the grammar eval scores this
+            # field, and a hand-verified question mixed into it would measure
+            # the list rather than the model (eval/README.md). The spoken line
+            # is the two joined.
             tl.set("reply", reply)
+        reply = self._invite(reply, transcript=transcript, topic=topic,
+                             continuing=continuing)
         self._pose("neutral")                 # face forward while speaking
-        english = self._speak(reply)          # times the tts stage itself
+        self._speak(reply)                    # times the tts stage itself
+        # The record is detached here and written by the gloss thread, which
+        # adds reply_en when it has it. Detaching now is what keeps the run
+        # loop free: waiting for a translation would hold the state machine in
+        # SPEAKING, and a robot that is not LISTENING cannot hear the answer to
+        # the question it just asked.
         if tl:
-            if english:
-                tl.set("reply_en", english)
-            tl.emit()
+            self._gloss_async(reply, tl.take(), tl)
         self.state = State.SPEAKING
+
+    # ---------------------------------------------------- keeping it going
+
+    def _invite(self, reply: str, *, transcript: str = "",
+                topic: str | None = None, continuing: bool = False) -> str:
+        """``reply`` plus a verified follow-up question (FR-3.12).
+
+        Runs after validation, never before: the questions are hand-checked
+        Sanskrit, so putting them through the morphology gate could only cost a
+        good line — and a retry triggered by Mitra's own fixed phrasing would
+        re-roll the answer to punish a word the model did not write.
+
+        Left alone when the reply already asks something (the child is never
+        handed two questions at once), when it is one of the fixed phrases that
+        already asks for another try, and when there is no list configured.
+        """
+        if self.followups is None or not reply.strip():
+            return reply
+        if reply.strip() in _NO_INVITE_AFTER:
+            return reply
+        if topic is None and followup_list.has_question(reply):
+            # The model asked its own question, against instructions. Nothing to
+            # carry forward either: unlike an appended one, that question IS in
+            # the model's history, so the next turn already makes sense to it.
+            #
+            # Not applied to a recitation (``topic``), which is not Mitra
+            # speaking for itself: classical verse is full of interrogatives —
+            # *तथेदं कुत्र कुप्यते* ("at what, then, is one angry?") — and read
+            # as a question to the child it cost the verse its invitation, and
+            # the next two turns with it. A verse asks the poet's question, not
+            # Mitra's.
+            return reply
+        try:
+            question = self.followups.pick(
+                transcript=transcript, reply=reply, topic=topic,
+                continuing=continuing)
+        except Exception:
+            # A flat reply is a worse conversation, not a broken one (FR-6.4).
+            self.logger.exception("follow-up selection failed; replying flat")
+            return reply
+        if not question:
+            return reply
+        self._pending_question = question
+        if self.turn_logger:
+            self.turn_logger.set("followup", question)
+        return followup_list.join_question(reply, question)
 
     def _transcribe(self, payload) -> tuple[str, str | None]:
         if isinstance(payload, str):          # tests / text console mode
@@ -478,6 +698,13 @@ class Orchestrator:
         """
         ok, reason = validator.validate(reply, self.max_reply_chars)
         if not ok:
+            # A bad construction is not a bad word: the retry has to name the
+            # shape and its replacement, not a list of words that are each
+            # fine on their own.
+            construction = validator.wrong_construction(reply)
+            if construction:
+                return False, reason, prompts.CONSTRUCTION_CORRECTION_SUFFIX.format(
+                    wrong=construction[0], right=construction[1])
             # Name the words when we know them, here too: a reply rejected for
             # Hindi comes back unchanged from a generic "answer in Sanskrit".
             hindi = validator.hindi_markers(reply)
@@ -485,7 +712,7 @@ class Orchestrator:
         if self.grammar_checker is None:
             return True, "", ""
         try:
-            findings = self.grammar_checker(reply)
+            findings = self.grammar_checker(reply, allow=self._is_a_name)
         except Exception:
             # A checker fault must not cost the child an answer: the reply has
             # already passed the deterministic gate (FR-6.4).
@@ -542,11 +769,15 @@ class Orchestrator:
 
     # ------------------------------------------------------------- speaking
 
-    def _speak(self, text: str) -> str | None:
+    def _speak(self, text: str) -> None:
         """Deterministic speech path (DESIGN §1.4): synthesize, play without
         blocking (for barge-in), post playback_done when the speaker frees up.
 
-        Returns the English gloss of ``text`` when glossing is on, else None.
+        Returns as soon as playback has started. Nothing slow may be added
+        after that point: this runs on the run-loop thread, and every
+        millisecond spent here is a millisecond in which ``playback_done``
+        sits unhandled and the microphone is still routed to the wake
+        detector rather than to the segmenter.
         """
         self.logger.info("speak: %s", text)
         self._barge_in.clear()
@@ -559,10 +790,6 @@ class Orchestrator:
             self.events.put(Event("playback_done"))
         else:
             threading.Thread(target=self._watch_playback, daemon=True).start()
-        # Glossed only now, with the audio already playing: the translation is
-        # a second model call, and it must not sit between a finished reply
-        # and the speaker.
-        return self._log_gloss(text)
 
     def _synthesize(self, text: str) -> tuple[np.ndarray, int]:
         """Waveform for a line, with the dandas of a recitation made audible.
@@ -590,22 +817,50 @@ class Orchestrator:
         with self.turn_logger.stage("tts"):
             yield
 
-    def _log_gloss(self, text: str) -> str | None:
+    def _gloss_async(self, text: str, record=None, turn_logger=None) -> None:
         """Mirror the spoken line in English on the console (FR-7.2).
 
-        A log convenience: it is never allowed to end a turn that already has
-        its reply and its audio (FR-6.4).
+        Off the run loop, always. The gloss is a second model call, and when it
+        ran inline it held the state machine in WAKING/SPEAKING for as long as
+        the call took — 14 s on the first one of a session, while the mic was
+        still routed to the wake detector. Mitra greeted, asked "त्वं कथम्
+        असि?", and discarded the answer as a failed wake match. A log
+        convenience must never cost a turn (FR-6.4), and being late costs
+        nothing: the audio is already playing.
+
+        ``record``, when given, is a detached turn record this thread finishes
+        and writes once the gloss is in.
         """
         if self.glosser is None:
-            return None
-        try:
-            english = self.glosser.gloss(text)
-        except Exception:
-            self.logger.exception("English gloss failed; continuing")
-            return None
-        if english:
-            self.logger.info("speak (en): %s", english)
-        return english
+            # Nothing to translate — write the record here rather than paying
+            # for a worker on every turn of a non-debug run.
+            if record is not None and turn_logger is not None:
+                turn_logger.write(record)
+            return
+        if self._gloss_worker is None:
+            self._gloss_worker = threading.Thread(target=self._gloss_loop,
+                                                  daemon=True)
+            self._gloss_worker.start()
+        self._gloss_queue.put((text, record, turn_logger))
+
+    def _gloss_loop(self) -> None:
+        """Drain the gloss queue, one line at a time, for the whole session."""
+        while True:
+            text, record, turn_logger = self._gloss_queue.get()
+            try:
+                english = None
+                try:
+                    english = self.glosser.gloss(text)
+                except Exception:
+                    self.logger.exception("English gloss failed; continuing")
+                if english:
+                    self.logger.info("speak (en): %s", english)
+                if record is not None and turn_logger is not None:
+                    if english:
+                        record["reply_en"] = english
+                    turn_logger.write(record)
+            finally:
+                self._gloss_queue.task_done()
 
     def _watch_playback(self) -> None:
         started = time.monotonic()

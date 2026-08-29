@@ -96,6 +96,16 @@ session:
     # reply appended a stock "and you?", and that trailing question
     # carried most of the grammar errors. 2 allows it back.
 
+# Every reply ends with a question back, so the child always has something to
+# answer and the session stays a conversation rather than a lookup service
+# (FR-3.12). The questions come from src/agent/followups.py — hand-verified
+# Sanskrit, appended after validation, never generated: the model's own
+# reciprocal questions were where its grammar failed (कथं भवतः?), which is why
+# v1.5 removed them from the prompt in the first place. false == the layer is
+# absent and Mitra answers and waits, exactly as before.
+conversation:
+  follow_up: true
+
 lexicon:
   db_path: "data/lexicon.db"
 

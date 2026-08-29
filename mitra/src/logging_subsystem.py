@@ -54,13 +54,31 @@ class TurnLogger:
         finally:
             self._turn.setdefault("stages", {})[name] = round(time.monotonic() - t0, 3)
 
-    def emit(self) -> dict:
-        record = self._turn
-        self._turn = {}
+    def take(self) -> dict:
+        """Detach the turn under construction without writing it.
+
+        For the caller that still has something to add from another thread —
+        the English gloss arrives after the turn is over (FR-7.2). Detaching
+        first is what makes that safe: the next ``start_turn`` cannot collide
+        with a record somebody else is still holding.
+        """
+        record, self._turn = self._turn, {}
+        return record
+
+    def write(self, record: dict) -> None:
+        """Append one finished record. Safe to call from any thread: each
+        record is a single line appended to a file opened per call, so writes
+        interleave but never tear. A slow gloss can therefore land a record
+        after the next turn's — they carry ``ts``, and nothing reads them in
+        file order."""
         try:
             with self.path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError:  # logging must never take the session down (FR-6.4)
             self.logger.exception("failed to write turn log")
         self.logger.debug("turn: %s", json.dumps(record, ensure_ascii=False))
+
+    def emit(self) -> dict:
+        record = self.take()
+        self.write(record)
         return record

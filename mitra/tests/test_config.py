@@ -10,7 +10,7 @@ CONFIG = yaml.safe_load(
 
 def test_required_sections_present():
     for key in ("robot", "models", "agent", "cloud_fallback", "session",
-                "lexicon", "logging"):
+                "conversation", "lexicon", "logging"):
         assert key in CONFIG, key
     for key in ("llm", "asr", "tts", "wake", "vad"):
         assert key in CONFIG["models"], key
@@ -28,6 +28,11 @@ def test_value_sanity():
     assert 0 < CONFIG["models"]["wake"]["threshold"] <= 1
     assert CONFIG["session"]["silence_timeout_s"] > 0
     assert CONFIG["session"]["max_reply_chars"] == 220
+
+
+def test_follow_ups_are_on():
+    """FR-3.12: shipping with them off would leave every turn a dead end."""
+    assert CONFIG["conversation"]["follow_up"] is True
 
 
 def test_vad_segmenter_energy_fallback():

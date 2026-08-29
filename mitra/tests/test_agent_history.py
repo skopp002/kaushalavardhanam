@@ -76,3 +76,54 @@ def test_unexpected_message_shape_leaves_history_alone():
     agent = _trimmer("not a list")
     agent._trim_history()
     assert agent._agent.messages == "not a list"
+
+
+# ------------------------------------------- running out of context (FR-6.4)
+
+class MaxTokensReachedException(Exception):
+    """Same name as the Strands exception, which is an optional import."""
+
+
+class _RunawayAgent(_StubAgent):
+    """Stops mid-sentence and leaves the partial message in history, as
+    Strands does when Ollama reports ``done_reason: length``."""
+
+    def __call__(self, message):
+        self.messages.append({"role": "user", "content": [{"text": message}]})
+        self.messages.append(
+            {"role": "assistant", "content": [{"text": "The verse says that"}]})
+        raise MaxTokensReachedException("out of room")
+
+
+def _agent_over_stub(stub):
+    agent = MitraAgent.__new__(MitraAgent)
+    agent.max_history_turns = 4
+    agent._agent = stub
+    return agent
+
+
+def test_a_truncated_reply_is_spoken_rather_than_lost():
+    agent = _agent_over_stub(_RunawayAgent(_mk(1)))
+    assert agent.converse("What does that mean?") == "The verse says that"
+
+
+def test_the_half_finished_message_does_not_stay_in_history():
+    """It made the following reply English too, and the gate failed it twice."""
+    stub = _RunawayAgent(_mk(1))
+    agent = _agent_over_stub(stub)
+    agent.converse("What does that mean?")
+    assert all(m["content"][0]["text"] != "The verse says that"
+               for m in stub.messages)
+
+
+def test_any_other_failure_still_reaches_the_orchestrator():
+    class _Broken(_StubAgent):
+        def __call__(self, message):
+            raise RuntimeError("ollama is down")
+
+    agent = _agent_over_stub(_Broken([]))
+    try:
+        agent.converse("hello")
+    except RuntimeError:
+        return
+    raise AssertionError("the failure was swallowed")
