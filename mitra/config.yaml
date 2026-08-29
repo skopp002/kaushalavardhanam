@@ -1,11 +1,21 @@
 # Mitra runtime configuration (DESIGN.md §7)
 #
-# Platform note: tuned here for the Linux host (x86_64 + RTX 3070 mobile,
-# 8 GB VRAM). macOS/M1 Max values are kept inline as comments so one file
-# serves both. The mlx and parler paths are Apple-Silicon-only.
+# Platform note: tuned here for Windows (x86_64). macOS and Linux values are
+# kept inline as comments so one file serves all three. The mlx and parler
+# paths are Apple-Silicon-only and are never selected here.
+#
+# Caveat: the reachy-mini daemon is supported on macOS and Linux only
+# (REQUIREMENTS §3). With robot.backend: reachy this config cannot connect on
+# Windows today. See the note on robot.backend below.
 
 robot:
-  backend: reachy # reachy (real Lite over USB, or --sim daemon) | fake
+  backend:
+    reachy # reachy (real Lite over USB, or --sim daemon) | fake
+    # Windows: the daemon is not supported upstream, so
+    # "reachy" cannot connect. "fake" runs the pipeline but
+    # FakeReachy is a test double — its mic returns zeros and
+    # its speaker discards audio, so there is no real speech
+    # in or out. Windows is model/eval-ready, not robot-ready.
   mic_chunk_s: 0.08 # seconds of audio per microphone read
   gestures:
     true # state poses: antennas perk when listening, head
@@ -18,9 +28,15 @@ robot:
     # Linux: the daemon's media server needs the GStreamer
     # webrtc plugin (webrtcsink), absent on Ubuntu 22.04 —
     # run the daemon with --no-media and capture here.
+    # Windows: host capture via sounddevice (WASAPI) is the
+    # only path that works at all — the daemon is unsupported.
   built_in_mic_device:
-    "pulse" # linux: PulseAudio/PipeWire default source.
-    # mac: "MacBook Pro Microphone".
+    null # windows: null = the system default input device.
+    # Device names vary per machine ("Microphone (Realtek(R)
+    # Audio)"), so there is no portable literal — set one only
+    # if the default picks the wrong input. sounddevice also
+    # accepts an integer index.
+    # linux: "pulse". mac: "MacBook Pro Microphone".
     # List candidates: python -c "import sounddevice as sd;
     # print(sd.query_devices())"
 
@@ -33,8 +49,9 @@ models:
       # variant: slow and returns empty content
     keep_alive:
       "30m" # keeps the model resident between turns (REQUIREMENTS §8).
-      # On 8 GB VRAM this leaves no room for ASR/TTS on the
-      # GPU, which is why both sit on cpu below.
+      # Ollama has a native Windows build. On a consumer GPU
+      # it takes most of the VRAM, which is why the speech
+      # models sit on cpu below.
     temperature: 0.3
   asr:
     # turbo: half the download of large-v3 and 4-6x faster decoding at
@@ -42,11 +59,14 @@ models:
     # Drop to openai/whisper-small (~500 MB) if disk or RAM is tight.
     default: "openai/whisper-small" # mac: mlx-community/whisper-large-v3-turbo
     sanskrit: null # HF repo of a Sanskrit Whisper fine-tune, once selected (Phase 3)
-    backend: "transformers" # transformers (linux) | mlx (mac, Apple Silicon only)
-    device: "cpu" # mac: mps. cuda:0 here would contend with Qwen for VRAM
+    backend: "transformers" # transformers (windows/linux) | mlx (mac only)
+    device:
+      "cpu" # mac: mps. With an NVIDIA card and a CUDA torch
+      # build, "cuda:0" is much faster — but it contends with
+      # Ollama for VRAM, so raise it only if the LLM still fits.
   tts:
     engine:
-      "vits" # vits (linux) | indic-parler-tts (mac)
+      "vits" # vits (windows/linux) | indic-parler-tts (mac)
       # parler-tts pins transformers<=4.46.1, which collides
       # with reachy-mini's huggingface-hub>=1.17 — the two
       # are not co-installable (see src/speech/tts.py)
@@ -66,7 +86,7 @@ models:
     asr_model:
       "openai/whisper-small" # tiny mis-hears "mitra"; small is accurate
       # (see src/audio/wake.py). mac: mlx-community/whisper-small-mlx
-    backend: "transformers" # transformers (linux) | mlx (mac)
+    backend: "transformers" # transformers (windows/linux) | mlx (mac)
     device: "cpu" # runs on every gated speech window — keep it off the GPU
     model: "models/mitra.onnx" # used by engine: openwakeword
     threshold: 0.6
@@ -125,7 +145,9 @@ shlokas:
 # in validator.py cannot see Hindi written in Devanagari — खेलानि, आज, घरे and
 # मक्खनम् all scored 1.00 and were spoken — and cannot see invented verb forms
 # like करोष्यसि at all. These can.
-#   pip install 'mitra[sanskrit]' && python3 scripts/fetch_sanskrit_data.py
+#   pip install "mitra[sanskrit]"; python scripts\fetch_sanskrit_data.py
+#   (PowerShell: quote the extra with " — ' is not a pip-safe quote there,
+#   and the interpreter is "python", not "python3")
 # Absent data disables the checks with a warning; nothing else changes.
 sanskrit:
   enabled: true
