@@ -219,10 +219,31 @@ Everything below assumes the venv is active (`source .venv/bin/activate` — see
 
 ```bash
 cd mitra
-pip install -e '.[agent,wake,vad,asr]'          # agent + speech-input layers
+pip install -e '.[agent,wake,vad,asr,sanskrit]'  # agent + speech-input + grammar layers
 pip install torch transformers git+https://github.com/huggingface/parler-tts.git   # Sanskrit TTS
 ollama pull qwen3-vl:8b-instruct                # the LLM (~6 GB, one time)
 ```
+
+**Sanskrit grammar data** (one time — ~78 MB, lives outside git). Every reply is
+checked against a real inflected lexicon rather than a list of banned words
+(DESIGN §5); the same fetch also indexes the Cologne dictionaries used by the
+lexicon review CLI:
+
+```bash
+python3 scripts/fetch_sanskrit_data.py          # vidyut morphology + Cologne dicts
+python3 scripts/build_dictionary.py             # index MW/Apte for mitra-lexicon
+```
+
+Skip it and Mitra runs exactly as before, logging one warning at startup and
+falling back to the Devanagari-ratio check alone.
+
+**Corpora.** The verse corpus for *"recite a shloka"* (`data/shlokas.json`, 500
+public-domain verses) is committed, so a fresh clone can recite with no extra
+step. The conversational phrasebook is **not** — the source is copyrighted, so
+`data/daily.pdf` and `data/phrasebook.jsonl` are gitignored. Copy them from a
+machine that has them, or rebuild with `python3 scripts/build_phrasebook.py
+data/daily.pdf`. Without it Mitra still talks; replies are just ungrounded, and
+startup says so.
 
 **Unlock the Sanskrit voice** (one time — the TTS model is a *gated* Hugging Face repo with automatic approval):
 
