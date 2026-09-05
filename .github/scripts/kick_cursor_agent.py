@@ -2,7 +2,7 @@
 """Start a Cursor Cloud Agent on the AgentCore self-hosted pool.
 
 Triggers:
-  - GitHub Project (users/skopp002/projects/2) Status set to In Progress
+  - GitHub Project (orgs/kaushalavardhanam/projects/1) Status set to In Progress
     for issues whose title starts with 'agent-'
   - Issue labeled 'in-progress'
   - workflow_dispatch with an issue number
@@ -152,44 +152,56 @@ Operating constraints:
     print(f"started {agent_id} -> {agent_url}")
 
 
-def scan_project(owner: str, number: int, repo: str, project_token: str, comment_token: str, cursor_key: str, pool: str) -> int:
-    query = """
-    query ($login: String!, $number: Int!, $cursor: String) {
-      user(login: $login) {
-        projectV2(number: $number) {
-          items(first: 50, after: $cursor) {
-            pageInfo { hasNextPage endCursor }
-            nodes {
-              fieldValues(first: 20) {
-                nodes {
-                  ... on ProjectV2ItemFieldSingleSelectValue {
+def scan_project(
+    owner: str,
+    number: int,
+    repo: str,
+    project_token: str,
+    comment_token: str,
+    cursor_key: str,
+    pool: str,
+    owner_type: str,
+) -> int:
+    root = "organization" if owner_type == "organization" else "user"
+    query = f"""
+    query ($login: String!, $number: Int!, $cursor: String) {{
+      {root}(login: $login) {{
+        projectV2(number: $number) {{
+          items(first: 50, after: $cursor) {{
+            pageInfo {{ hasNextPage endCursor }}
+            nodes {{
+              fieldValues(first: 20) {{
+                nodes {{
+                  ... on ProjectV2ItemFieldSingleSelectValue {{
                     name
-                    field { ... on ProjectV2SingleSelectField { name } }
-                  }
-                }
-              }
-              content {
+                    field {{ ... on ProjectV2SingleSelectField {{ name }} }}
+                  }}
+                }}
+              }}
+              content {{
                 __typename
-                ... on Issue {
+                ... on Issue {{
                   number
                   title
                   url
-                  repository { nameWithOwner }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+                  repository {{ nameWithOwner }}
+                }}
+              }}
+            }}
+          }}
+        }}
+      }}
+    }}
     """
     started = 0
     cursor = None
     while True:
         data = graphql(project_token, query, {"login": owner, "number": number, "cursor": cursor})
-        project = (data.get("user") or {}).get("projectV2")
+        project = (data.get(root) or {}).get("projectV2")
         if not project:
-            raise RuntimeError(f"Project {owner}/{number} not found or token lacks project read access")
+            raise RuntimeError(
+                f"Project {owner_type} {owner}/{number} not found or token lacks project read access"
+            )
         items = project["items"]
         for node in items["nodes"]:
             content = node.get("content") or {}
@@ -222,8 +234,12 @@ def main() -> int:
     comment_token = env("GITHUB_TOKEN")
     project_token = env("GH_PROJECT_TOKEN") or comment_token
     pool = env("CURSOR_POOL_NAME", "agentcore-platform-agents")
-    project_owner = env("PROJECT_OWNER", "skopp002")
-    project_number = int(env("PROJECT_NUMBER", "2") or "2")
+    project_owner = env("PROJECT_OWNER", "kaushalavardhanam")
+    project_number = int(env("PROJECT_NUMBER", "1") or "1")
+    owner_type = env("PROJECT_OWNER_TYPE", "organization").lower()
+    if owner_type not in {"organization", "user"}:
+        print(f"PROJECT_OWNER_TYPE must be organization or user, got {owner_type!r}", file=sys.stderr)
+        return 1
     event = env("GITHUB_EVENT_NAME") or env("EVENT_NAME")
 
     if not repo or not cursor_key or not comment_token:
@@ -245,8 +261,20 @@ def main() -> int:
         start_agent(issue, repo, comment_token, cursor_key, pool)
         return 0
 
-    print(f"scanning project {project_owner}/{project_number} for In Progress {TITLE_PREFIX}* issues")
-    started = scan_project(project_owner, project_number, repo, project_token, comment_token, cursor_key, pool)
+    print(
+        f"scanning {owner_type} project {project_owner}/{project_number} "
+        f"for In Progress {TITLE_PREFIX}* issues"
+    )
+    started = scan_project(
+        project_owner,
+        project_number,
+        repo,
+        project_token,
+        comment_token,
+        cursor_key,
+        pool,
+        owner_type,
+    )
     print(f"started {started} agent(s)")
     return 0
 
